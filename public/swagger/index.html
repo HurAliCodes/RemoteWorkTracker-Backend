@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>API Docs (Swagger UI)</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"
+    />
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: #fafafa;
+      }
+      .swagger-ui .topbar {
+        display: none;
+      }
+      #swagger-ui {
+        min-height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+    <script
+      src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"
+      charset="UTF-8"
+    ></script>
+    <script
+      src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-standalone-preset.js"
+      charset="UTF-8"
+    ></script>
+    <script>
+      window.onload = () => {
+        // Resolve openapi.json relative to the current URL so the page
+        // works whether it's mounted at /docs/, /swagger/, or anywhere
+        // else.
+        const specUrl = new URL("./openapi.json", window.location.href).toString();
+
+        window.ui = SwaggerUIBundle({
+          url: specUrl,
+          dom_id: "#swagger-ui",
+          deepLinking: true,
+          persistAuthorization: true,
+          displayRequestDuration: true,
+          tryItOutEnabled: true,
+          filter: true,
+          docExpansion: "list",
+          presets: [
+            SwaggerUIBundle.presets.apis,
+            SwaggerUIStandalonePreset,
+          ],
+          plugins: [SwaggerUIBundle.plugins.DownloadUrl],
+          layout: "StandaloneLayout",
+        });
+      };
+    </script>
+  </body>
+</html>

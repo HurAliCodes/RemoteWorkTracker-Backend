@@ -1,0 +1,10 @@
+import express from 'express';
+import { registerDevice, heartbeat, activity, idle, createPairingCode } from './agent.controller';
+import { authenticateJWT } from '../../middleware/auth.middleware';
+const router = express.Router();
+router.post('/pairing-code', authenticateJWT, createPairingCode);
+router.post('/register', registerDevice);
+router.post('/heartbeat', heartbeat);
+router.post('/activity', activity);
+router.post('/idle', idle);
+export default router;
