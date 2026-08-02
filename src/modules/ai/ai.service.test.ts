@@ -10,10 +10,12 @@ import {
 } from './ai.service';
 
 function jsonResponse(ok: boolean, status: number, body: Record<string, unknown>): Response {
+	const text = JSON.stringify(body);
 	return {
 		ok,
 		status,
 		json: async () => body,
+		text: async () => text,
 		headers: {
 			get: (name: string) => (name.toLowerCase() === 'x-trace-id' ? 'trace-ai-1' : null),
 		},

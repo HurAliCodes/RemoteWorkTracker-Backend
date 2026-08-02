@@ -20,11 +20,15 @@ import telemetryRouter from "./modules/telemetry/telemetry.routes";
 import dashboardRouter from "./modules/dashboard/dashboard.routes";
 import analyticsRouter from "./modules/analytics/analytics.routes";
 import aiRouter from "./modules/ai/ai.routes";
+import complianceRouter from "./modules/compliance/compliance.routes";
+import performanceRouter from "./modules/performance/performance.routes";
 import { ENV } from "./config/env";
 import { getCorsOptions } from "./config/cors";
 import { apiRateLimiter } from "./middleware/rateLimit.middleware";
+import { requestContextMiddleware } from "./middleware/requestContext.middleware";
 import { notFoundHandler } from "./middleware/notFoundHandler";
 import { errorMiddleware } from "./middleware/error.middleware";
+import opsRouter from "./routes/ops.routes";
 
 const app = express();
 
@@ -37,6 +41,7 @@ if (ENV.TRUST_PROXY) {
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors(getCorsOptions()));
 app.use(express.json({ limit: '1mb' }));
+app.use(requestContextMiddleware);
 
 // Swagger UI + OpenAPI spec (static files).
 // In a serverless deployment the working directory layout differs from local
@@ -87,6 +92,8 @@ app.use("/api/v1/telemetry", telemetryRouter);
 app.use("/api/v1/dashboard", dashboardRouter);
 app.use("/api/v1/analytics", analyticsRouter);
 app.use("/api/v1/ai", aiRouter);
+app.use("/api/v1/compliance", complianceRouter);
+app.use("/api/v1/performance", performanceRouter);
 app.get("/", (req, res) => {
   const payload = {
     status: "ok",
@@ -132,6 +139,8 @@ app.get("/health", (_req, res) => {
     uptime: process.uptime(),
   });
 });
+
+app.use(opsRouter);
 
 app.use(notFoundHandler);
 app.use(errorMiddleware);

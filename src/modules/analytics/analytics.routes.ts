@@ -1,5 +1,6 @@
 import { Router } from 'express';
-import { authenticateJWT } from '../../middleware/auth.middleware';
+import { authenticateJWT, requirePortalToken } from '../../middleware/auth.middleware';
+import { aiHeavyRateLimiter } from '../../middleware/rateLimit.middleware';
 import {
 	getAiPerformanceRankingController,
 	getAnalyticsOverviewController,
@@ -11,11 +12,12 @@ import {
 
 const router = Router();
 
-router.get('/overview', authenticateJWT, getAnalyticsOverviewController);
-router.post('/ai-report/generate', authenticateJWT, postGeneratePortalAiReportController);
-router.get('/ai-reports/:employeeId', authenticateJWT, getPortalAiWeeklyReportsController);
-router.get('/productivity', authenticateJWT, getProductivityAnalyticsController);
-router.get('/team-performance', authenticateJWT, getTeamPerformanceAnalyticsController);
-router.get('/ai-performance-ranking', authenticateJWT, getAiPerformanceRankingController);
+router.use(authenticateJWT, requirePortalToken);
+router.get('/overview', getAnalyticsOverviewController);
+router.post('/ai-report/generate', aiHeavyRateLimiter, postGeneratePortalAiReportController);
+router.get('/ai-reports/:employeeId', getPortalAiWeeklyReportsController);
+router.get('/productivity', getProductivityAnalyticsController);
+router.get('/team-performance', getTeamPerformanceAnalyticsController);
+router.get('/ai-performance-ranking', getAiPerformanceRankingController);
 
 export default router;

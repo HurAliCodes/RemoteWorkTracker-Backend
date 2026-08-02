@@ -10,6 +10,7 @@ import type { AuthRequest } from '../../middleware/auth.middleware';
 import { success, error } from '../../utils/response';
 import { findUserById } from '../users/user.repo';
 import { resolveCallerOrganizationId } from '../../utils/resolve-org-from-auth';
+import { attendanceBelongsToOrg, assertResourceInCallerOrg } from '../../utils/org-access';
 import { getDailyTelemetry, toAttendanceLikeRows } from '../telemetry/telemetry.service';
 
 export async function getAttendanceController(req: AuthRequest, res: Response) {
@@ -40,13 +41,14 @@ export async function getAttendanceController(req: AuthRequest, res: Response) {
 
 export async function getAttendanceByIdController(req: AuthRequest, res: Response) {
 	try {
-		if (!req.user?.userId) return error(res, 'Unauthorized', 401);
-
 		let { id } = req.params;
 		if (Array.isArray(id)) id = id[0];
 		const parseResult = attendanceIdParamSchema.safeParse({ id });
 		if (!parseResult.success) {
 			return error(res, parseResult.error.issues[0]?.message || 'Invalid attendance ID', 400);
+		}
+		if (!(await assertResourceInCallerOrg(req, res, id, attendanceBelongsToOrg, 'Attendance record not found'))) {
+			return;
 		}
 		const record = await getAttendanceById(id);
 		if (!record) {
@@ -90,13 +92,14 @@ export async function getMyAttendanceController(req: AuthRequest, res: Response)
 
 export async function deleteAttendanceByIdController(req: AuthRequest, res: Response) {
 	try {
-		if (!req.user?.userId) return error(res, 'Unauthorized', 401);
-
 		let { id } = req.params;
 		if (Array.isArray(id)) id = id[0];
 		const parseResult = attendanceIdParamSchema.safeParse({ id });
 		if (!parseResult.success) {
 			return error(res, parseResult.error.issues[0]?.message || 'Invalid attendance ID', 400);
+		}
+		if (!(await assertResourceInCallerOrg(req, res, id, attendanceBelongsToOrg, 'Attendance record not found'))) {
+			return;
 		}
 		const deleted = await removeAttendanceById(id);
 		if (!deleted) return error(res, 'Attendance record not found', 404);
@@ -108,13 +111,14 @@ export async function deleteAttendanceByIdController(req: AuthRequest, res: Resp
 
 export async function patchAttendanceByIdController(req: AuthRequest, res: Response) {
 	try {
-		if (!req.user?.userId) return error(res, 'Unauthorized', 401);
-
 		let { id } = req.params;
 		if (Array.isArray(id)) id = id[0];
 		const paramResult = attendanceIdParamSchema.safeParse({ id });
 		if (!paramResult.success) {
 			return error(res, paramResult.error.issues[0]?.message || 'Invalid attendance ID', 400);
+		}
+		if (!(await assertResourceInCallerOrg(req, res, id, attendanceBelongsToOrg, 'Attendance record not found'))) {
+			return;
 		}
 		const bodyResult = attendancePatchSchema.safeParse(req.body);
 		if (!bodyResult.success) {

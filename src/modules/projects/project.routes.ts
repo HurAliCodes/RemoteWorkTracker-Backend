@@ -9,12 +9,12 @@ import {
   addProjectMemberController,
   removeProjectMemberController,
 } from './project.controller';
-import { authenticateJWT } from '../../middleware/auth.middleware';
+import { authenticateJWT, requirePortalToken } from '../../middleware/auth.middleware';
 import { apiRateLimiter } from '../../middleware/rateLimit.middleware';
 
 const router = express.Router();
 
-router.use(authenticateJWT);
+router.use(authenticateJWT, requirePortalToken);
 
 
 router.post('/', apiRateLimiter, createProjectController);

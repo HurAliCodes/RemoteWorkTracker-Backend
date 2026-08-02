@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { authenticateJWT } from '../../middleware/auth.middleware';
+import { authenticateJWT, requirePortalToken } from '../../middleware/auth.middleware';
 import {
   createWellnessLogController,
   getMyWellnessLogsController,
@@ -8,8 +8,9 @@ import {
 
 const router = Router();
 
-router.post('/mood', authenticateJWT, createWellnessLogController);
-router.get('/', authenticateJWT, getWellnessLogsController);
-router.get('/me', authenticateJWT, getMyWellnessLogsController);
+router.use(authenticateJWT, requirePortalToken);
+router.post('/mood', createWellnessLogController);
+router.get('/', getWellnessLogsController);
+router.get('/me', getMyWellnessLogsController);
 
 export default router;

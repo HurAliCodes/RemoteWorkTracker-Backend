@@ -1,8 +1,15 @@
 import { NextFunction, Request, Response } from 'express';
 import logger from '../../config/logger';
 import type { AuthRequest } from '../../middleware/auth.middleware';
+import { isManagerOrAdmin } from '../../middleware/requireAdmin.middleware';
 import { error as errorResponse, success } from '../../utils/response';
 import { resolveCallerOrganizationId } from '../../utils/resolve-org-from-auth';
+import {
+  assertResourceInCallerOrg,
+  goalBelongsToOrg,
+  userBelongsToOrg,
+  requireCallerOrgId,
+} from '../../utils/org-access';
 import { getGoalsQuerySchema } from './goal.validation';
 import {
   createGoalService,
@@ -13,9 +20,36 @@ import {
   updateGoalService,
 } from './goal.service';
 
+async function assertGoalAccess(req: Request, res: Response, goalId: string) {
+  const organizationId = await assertResourceInCallerOrg(
+    req as AuthRequest,
+    res,
+    goalId,
+    goalBelongsToOrg,
+    'Goal not found'
+  );
+  if (!organizationId) return null;
+
+  const privileged = await isManagerOrAdmin(req);
+  if (!privileged) {
+    const callerId = (req as AuthRequest).user?.userId;
+    const goal = await getGoalByIdService(goalId);
+    if (!goal || !callerId || goal.userId !== callerId) {
+      errorResponse(res, 'Forbidden', 403);
+      return null;
+    }
+  }
+  return organizationId;
+}
+
 export const createGoalController = async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const organizationId = await requireCallerOrgId(req as AuthRequest, res);
+    if (!organizationId) return;
     const body = req.body;
+    if (!(await userBelongsToOrg(body.userId, organizationId))) {
+      return errorResponse(res, 'User not found', 404);
+    }
     const result = await createGoalService({
       title: body.title,
       userId: body.userId,
@@ -47,8 +81,16 @@ export const getAllGoalsController = async (req: AuthRequest, res: Response, nex
       return errorResponse(res, 'organizationId does not match caller organization', 403);
     }
 
+    const privileged = await isManagerOrAdmin(req);
+    let userId = parsed.data.userId;
+    if (!privileged) {
+      const callerId = req.user?.userId;
+      if (!callerId) return errorResponse(res, 'Unauthorized', 401);
+      userId = callerId;
+    }
+
     const result = await getAllGoalsService({
-      userId: parsed.data.userId,
+      userId,
       status: parsed.data.status,
       page: parsed.data.page,
       limit: parsed.data.limit,
@@ -65,6 +107,7 @@ export const getAllGoalsController = async (req: AuthRequest, res: Response, nex
 export const getGoalByIdController = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const goalId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    if (!(await assertGoalAccess(req, res, goalId))) return;
     const goal = await getGoalByIdService(goalId);
     if (!goal) return errorResponse(res, 'Goal not found', 404);
 
@@ -78,7 +121,12 @@ export const getGoalByIdController = async (req: Request, res: Response, next: N
 export const updateGoalController = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const goalId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const organizationId = await assertGoalAccess(req, res, goalId);
+    if (!organizationId) return;
     const body = req.body;
+    if (body.userId && !(await userBelongsToOrg(body.userId, organizationId))) {
+      return errorResponse(res, 'User not found', 404);
+    }
 
     const result = await updateGoalService(goalId, {
       title: body.title,
@@ -99,6 +147,7 @@ export const updateGoalController = async (req: Request, res: Response, next: Ne
 export const deleteGoalController = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const goalId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    if (!(await assertGoalAccess(req, res, goalId))) return;
     const result = await deleteGoalService(goalId);
     return success(res, result, 'Goal deleted successfully');
   } catch (err: any) {
@@ -111,6 +160,7 @@ export const deleteGoalController = async (req: Request, res: Response, next: Ne
 export const updateGoalProgressController = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const goalId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    if (!(await assertGoalAccess(req, res, goalId))) return;
     const result = await updateGoalProgressService(goalId, Number(req.body.progress));
     return success(res, result, 'Goal progress updated successfully');
   } catch (err: any) {

@@ -1,17 +1,21 @@
 import amqp from 'amqplib';
 import logger from '../../config/logger';
+import { ENV } from '../../config/env';
 import { generateAnalyticsReport } from './ai.service';
 import { reportSyncSchema } from './ai.validation';
+import { AI_DLQ, AI_QUEUE } from '../../utils/rabbitmq';
 
-const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost';
-const AI_QUEUE = 'ai_events';
-const AI_DLQ = 'ai_events_dlq';
+const RABBITMQ_URL = ENV.RABBITMQ_URL || 'amqp://localhost';
 const MAX_RETRIES = 3;
-const metrics = {
+const RETRY_BASE_DELAY_MS = 500;
+
+export const aiConsumerMetrics = {
 	consumed: 0,
 	succeeded: 0,
 	retried: 0,
 	deadLettered: 0,
+	invalid: 0,
+	reconnects: 0,
 };
 
 type AiReportEvent = {
@@ -29,6 +33,11 @@ type DlqStoredMessage = {
 	headers?: Record<string, unknown>;
 };
 
+let consumerStarted = false;
+let reconnectTimer: NodeJS.Timeout | null = null;
+let activeConnection: { close: () => Promise<void>; on: (e: string, fn: (...args: unknown[]) => void) => void } | null =
+	null;
+
 function getRetryCount(msg: amqp.ConsumeMessage): number {
 	const raw = msg.properties.headers?.['x-retry-count'];
 	if (typeof raw === 'number') return raw;
@@ -36,97 +45,190 @@ function getRetryCount(msg: amqp.ConsumeMessage): number {
 	return 0;
 }
 
-export async function setupAiReportConsumer() {
+function sleep(ms: number) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function processMessage(channel: amqp.Channel, msg: amqp.ConsumeMessage) {
+	aiConsumerMetrics.consumed += 1;
+	const retryCount = getRetryCount(msg);
 	try {
-		const connection = await amqp.connect(RABBITMQ_URL);
-		const channel = await connection.createChannel();
-		await channel.assertQueue(AI_QUEUE, { durable: true });
-		await channel.assertQueue(AI_DLQ, { durable: true });
-		channel.prefetch(5);
+		const event = JSON.parse(msg.content.toString()) as AiReportEvent;
+		if (event.type !== 'ai:report:generate') {
+			channel.ack(msg);
+			return;
+		}
 
-		channel.consume(AI_QUEUE, async (msg: amqp.ConsumeMessage | null) => {
-			if (!msg) return;
-			metrics.consumed += 1;
-			const retryCount = getRetryCount(msg);
-			try {
-				const event = JSON.parse(msg.content.toString()) as AiReportEvent;
-				if (event.type !== 'ai:report:generate') {
-					channel.ack(msg);
-					return;
-				}
-
-				const parsed = reportSyncSchema.safeParse(event.data);
-				if (!parsed.success) {
-					logger.warn('Invalid AI report event payload', {
-						requestId: event.requestId,
-						errors: parsed.error.flatten(),
-					});
-					channel.ack(msg);
-					return;
-				}
-
-				await generateAnalyticsReport({
-					...parsed.data,
-					requestId: event.requestId,
-					tenantId: event.tenantId,
-				});
-				logger.info('Processed ai:report:generate event', {
-					requestId: event.requestId,
-					tenantId: event.tenantId,
-					metrics,
-				});
-				metrics.succeeded += 1;
-				channel.ack(msg);
-			} catch (err) {
-				if (retryCount < MAX_RETRIES) {
-					channel.sendToQueue(AI_QUEUE, msg.content, {
-						persistent: true,
-						headers: {
-							...msg.properties.headers,
-							'x-retry-count': retryCount + 1,
-						},
-					});
-					metrics.retried += 1;
-					channel.ack(msg);
-					return;
-				}
-
-				const failedAt = new Date().toISOString();
-				const deadLetterPayload = {
-					failedAt,
-					retryCount,
-					error: err instanceof Error ? err.message : String(err),
-					message: msg.content.toString(),
-					headers: msg.properties.headers ?? {},
-				};
-				channel.sendToQueue(AI_DLQ, Buffer.from(JSON.stringify(deadLetterPayload)), {
+		const parsed = reportSyncSchema.safeParse(event.data);
+		if (!parsed.success) {
+			aiConsumerMetrics.invalid += 1;
+			logger.warn('Invalid AI report event payload', {
+				requestId: event.requestId,
+				errors: parsed.error.flatten(),
+			});
+			// Invalid payloads are not retryable — ack and optionally DLQ for diagnosis
+			const failedAt = new Date().toISOString();
+			channel.sendToQueue(
+				AI_DLQ,
+				Buffer.from(
+					JSON.stringify({
+						failedAt,
+						retryCount,
+						error: 'Invalid payload',
+						message: msg.content.toString(),
+						headers: msg.properties.headers ?? {},
+					})
+				),
+				{
 					persistent: true,
 					headers: {
 						...msg.properties.headers,
 						'x-original-queue': AI_QUEUE,
 						'x-failed-at': failedAt,
+						'x-reason': 'invalid_payload',
 					},
-				});
-				metrics.deadLettered += 1;
-				logger.error('Failed to process ai_events message after retries', {
-					retryCount,
-					error: err instanceof Error ? err.message : String(err),
-					metrics,
-				});
-				channel.ack(msg);
-			}
-		});
+				}
+			);
+			aiConsumerMetrics.deadLettered += 1;
+			channel.ack(msg);
+			return;
+		}
 
-		logger.info('AI report consumer started', { queue: AI_QUEUE });
-	} catch (err) {
-		logger.error('Failed to start AI report consumer', {
-			error: err instanceof Error ? err.message : String(err),
+		await generateAnalyticsReport({
+			...parsed.data,
+			requestId: event.requestId,
+			tenantId: event.tenantId,
 		});
+		logger.info('Processed ai:report:generate event', {
+			requestId: event.requestId,
+			tenantId: event.tenantId,
+			metrics: { ...aiConsumerMetrics },
+		});
+		aiConsumerMetrics.succeeded += 1;
+		channel.ack(msg);
+	} catch (err) {
+		if (retryCount < MAX_RETRIES) {
+			const delay = RETRY_BASE_DELAY_MS * Math.pow(2, retryCount);
+			await sleep(delay);
+			channel.sendToQueue(AI_QUEUE, msg.content, {
+				persistent: true,
+				headers: {
+					...msg.properties.headers,
+					'x-retry-count': retryCount + 1,
+					'x-last-error': err instanceof Error ? err.message : String(err),
+				},
+			});
+			aiConsumerMetrics.retried += 1;
+			channel.ack(msg);
+			return;
+		}
+
+		const failedAt = new Date().toISOString();
+		const deadLetterPayload = {
+			failedAt,
+			retryCount,
+			error: err instanceof Error ? err.message : String(err),
+			message: msg.content.toString(),
+			headers: msg.properties.headers ?? {},
+		};
+		channel.sendToQueue(AI_DLQ, Buffer.from(JSON.stringify(deadLetterPayload)), {
+			persistent: true,
+			headers: {
+				...msg.properties.headers,
+				'x-original-queue': AI_QUEUE,
+				'x-failed-at': failedAt,
+			},
+		});
+		aiConsumerMetrics.deadLettered += 1;
+		logger.error('Failed to process ai_events message after retries', {
+			retryCount,
+			error: err instanceof Error ? err.message : String(err),
+			metrics: { ...aiConsumerMetrics },
+		});
+		channel.ack(msg);
 	}
 }
 
+function scheduleReconnect(fatal: boolean) {
+	if (reconnectTimer) return;
+	const delay = ENV.RABBITMQ_RECONNECT_MS;
+	logger.warn('Scheduling AI consumer reconnect', { delayMs: delay, fatal });
+	reconnectTimer = setTimeout(() => {
+		reconnectTimer = null;
+		aiConsumerMetrics.reconnects += 1;
+		consumerStarted = false;
+		void setupAiReportConsumer({ throwOnFailure: false });
+	}, delay);
+}
+
+/**
+ * Start the AI report consumer with reconnect/backoff.
+ * When `throwOnFailure` is true (worker mode), startup failure exits the process path to the caller.
+ */
+export async function setupAiReportConsumer(opts: { throwOnFailure?: boolean } = {}) {
+	const throwOnFailure = opts.throwOnFailure ?? false;
+	if (consumerStarted) return;
+	consumerStarted = true;
+
+	try {
+		const connection = (await amqp.connect(RABBITMQ_URL)) as unknown as {
+			createChannel: () => Promise<amqp.Channel>;
+			on: (event: string, listener: (...args: unknown[]) => void) => void;
+			close: () => Promise<void>;
+		};
+		activeConnection = connection;
+		const channel = await connection.createChannel();
+		await channel.assertQueue(AI_QUEUE, { durable: true });
+		await channel.assertQueue(AI_DLQ, { durable: true });
+		channel.prefetch(ENV.RABBITMQ_PREFETCH);
+
+		connection.on('error', (err) => {
+			logger.warn('AI consumer connection error', {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		});
+		connection.on('close', () => {
+			logger.warn('AI consumer connection closed');
+			activeConnection = null;
+			consumerStarted = false;
+			scheduleReconnect(false);
+		});
+
+		channel.consume(AI_QUEUE, async (msg: amqp.ConsumeMessage | null) => {
+			if (!msg) return;
+			await processMessage(channel, msg);
+		});
+
+		logger.info('AI report consumer started', { queue: AI_QUEUE, prefetch: ENV.RABBITMQ_PREFETCH });
+	} catch (err) {
+		consumerStarted = false;
+		logger.error('Failed to start AI report consumer', {
+			error: err instanceof Error ? err.message : String(err),
+		});
+		if (throwOnFailure) {
+			throw err instanceof Error ? err : new Error(String(err));
+		}
+		scheduleReconnect(true);
+	}
+}
+
+export async function stopAiReportConsumer() {
+	if (reconnectTimer) {
+		clearTimeout(reconnectTimer);
+		reconnectTimer = null;
+	}
+	if (activeConnection) {
+		await activeConnection.close().catch(() => undefined);
+		activeConnection = null;
+	}
+	consumerStarted = false;
+}
+
 export async function inspectDlqMessages(limit: number, tenantId?: string) {
-	const connection = await amqp.connect(RABBITMQ_URL);
+	const connection = (await amqp.connect(RABBITMQ_URL)) as unknown as {
+		createChannel: () => Promise<amqp.Channel>;
+		close: () => Promise<void>;
+	};
 	const channel = await connection.createChannel();
 	try {
 		await channel.assertQueue(AI_DLQ, { durable: true });
@@ -169,7 +271,10 @@ export async function inspectDlqMessages(limit: number, tenantId?: string) {
 }
 
 export async function replayDlqMessages(limit: number, tenantId?: string) {
-	const connection = await amqp.connect(RABBITMQ_URL);
+	const connection = (await amqp.connect(RABBITMQ_URL)) as unknown as {
+		createChannel: () => Promise<amqp.Channel>;
+		close: () => Promise<void>;
+	};
 	const channel = await connection.createChannel();
 	try {
 		await channel.assertQueue(AI_DLQ, { durable: true });

@@ -56,12 +56,12 @@ const parseMonthBounds = (month: string): { periodStart: string; periodEnd: stri
 };
 
 
-export const generatePayrollService = async (month: string) => {
+export const generatePayrollService = async (month: string, organizationId: string) => {
   const { periodStart, periodEnd } = parseMonthBounds(month);
 
-  // Fetch all users with their salary
   const usersResult = await pool.query(
-    `SELECT user_id, name, salary FROM users`,
+    `SELECT user_id, name, salary FROM users WHERE organization_id = $1`,
+    [organizationId],
   );
   const users = usersResult.rows;
 
@@ -72,29 +72,36 @@ export const generatePayrollService = async (month: string) => {
   const now = new Date().toISOString();
   let generatedCount = 0;
 
-  for (const user of users) {
-    const salary = Number(user.salary ?? 0);
-    const payrollId = crypto.randomUUID();
+  const { withTransaction } = await import('../../utils/withTransaction');
+  await withTransaction(async (client) => {
+    for (const user of users) {
+      const salary = Number(user.salary ?? 0);
+      const payrollId = crypto.randomUUID();
 
-    await pool.query(
-      `INSERT INTO payroll (payroll_id, user_id, period_start, period_end, amount, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT DO NOTHING`,
-      [payrollId, user.user_id, periodStart, periodEnd, salary, now, now],
-    );
+      const insertPayroll = await client.query(
+        `INSERT INTO payroll (payroll_id, user_id, period_start, period_end, amount, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (user_id, period_start, period_end) DO NOTHING
+         RETURNING payroll_id`,
+        [payrollId, user.user_id, periodStart, periodEnd, salary, now, now],
+      );
 
-    // Insert a breakdown entry for basicSalary
-    const entryId = crypto.randomUUID();
-    await pool.query(
-      `INSERT INTO payroll_entries (entry_id, payroll_id, description, amount, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [entryId, payrollId, 'basicSalary', salary, now, now],
-    );
+      if ((insertPayroll.rowCount ?? 0) === 0) {
+        continue;
+      }
 
-    generatedCount++;
-  }
+      const entryId = crypto.randomUUID();
+      await client.query(
+        `INSERT INTO payroll_entries (entry_id, payroll_id, description, amount, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [entryId, payrollId, 'basicSalary', salary, now, now],
+      );
 
-  logger.info('Payroll generated', { month, entriesGenerated: generatedCount });
+      generatedCount++;
+    }
+  });
+
+  logger.info('Payroll generated', { month, organizationId, entriesGenerated: generatedCount });
 
   return {
     month,
@@ -108,13 +115,14 @@ export const listPayrollService = async (opts: {
   month?: string;
   page?: number;
   limit?: number;
+  organizationId: string;
 }) => {
   const page = opts.page ?? 1;
   const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
   const offset = (page - 1) * limit;
 
-  const conditions: string[] = [];
-  const params: any[] = [];
+  const conditions: string[] = [`u.organization_id = $1`];
+  const params: any[] = [opts.organizationId];
 
   if (opts.userId) {
     params.push(opts.userId);
@@ -129,10 +137,13 @@ export const listPayrollService = async (opts: {
     conditions.push(`p.period_end = $${params.length}`);
   }
 
-  const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
   const countResult = await pool.query(
-    `SELECT COUNT(*)::int AS count FROM payroll p ${whereClause}`,
+    `SELECT COUNT(*)::int AS count
+     FROM payroll p
+     INNER JOIN users u ON u.user_id = p.user_id
+     ${whereClause}`,
     params,
   );
   const totalRecords = Number(countResult.rows[0]?.count ?? 0);
@@ -147,7 +158,7 @@ export const listPayrollService = async (opts: {
             SUM(CASE WHEN pe.description = 'bonus'       THEN pe.amount ELSE 0 END) AS bonus,
             SUM(CASE WHEN pe.description = 'deductions'  THEN pe.amount ELSE 0 END) AS deductions
      FROM payroll p
-     LEFT JOIN users u ON u.user_id = p.user_id
+     INNER JOIN users u ON u.user_id = p.user_id
      LEFT JOIN payroll_entries pe ON pe.payroll_id = p.payroll_id
      ${whereClause}
      GROUP BY p.payroll_id, p.user_id, p.period_start, p.period_end, p.amount, p.created_at, p.updated_at, u.name

@@ -5,6 +5,38 @@ import * as payrollService from './payroll.service';
 
 jest.mock('uuid', () => ({ v4: () => 'mock-uuid' }));
 jest.mock('./payroll.service');
+jest.mock('../../middleware/auth.middleware', () => ({
+  authenticateJWT: (req: any, _res: unknown, next: () => void) => {
+    req.user = { organizationId: 'org-test-id', admin: true, userId: 'bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb' };
+    next();
+  },
+  requirePortalToken: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireDeviceToken: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireEmployeeToken: (_req: unknown, _res: unknown, next: () => void) => next(),
+}));
+
+jest.mock('../../utils/org-access', () => ({
+  requireCallerOrgId: async (_req: unknown, _res: unknown) => 'org-test-id',
+  assertResourceInCallerOrg: async () => 'org-test-id',
+  projectBelongsToOrg: async () => true,
+  taskBelongsToOrg: async () => true,
+  goalBelongsToOrg: async () => true,
+  departmentBelongsToOrg: async () => true,
+  payrollBelongsToOrg: async () => true,
+  attendanceBelongsToOrg: async () => true,
+  userBelongsToOrg: async () => true,
+  courseInstructorInOrg: async () => true,
+}));
+
+jest.mock('../../middleware/requireAdmin.middleware', () => ({
+  requireOrgAdmin: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireManagerOrAdmin: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireAdmin: (_req: unknown, _res: unknown, next: () => void) => next(),
+  isManagerOrAdmin: async () => true,
+}));
+jest.mock('../../utils/resolve-org-from-auth', () => ({
+  resolveCallerOrganizationId: async () => 'org-test-id',
+}));
 
 const app = express();
 app.use(express.json());
@@ -49,7 +81,7 @@ describe('Payroll APIs', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.message).toBe('Payroll generated successfully');
       expect(res.body.data.entriesGenerated).toBe(25);
-      expect(mockedService.generatePayrollService).toHaveBeenCalledWith('2026-03');
+      expect(mockedService.generatePayrollService).toHaveBeenCalledWith('2026-03', 'org-test-id');
     });
 
     it('returns 400 for invalid month format', async () => {
@@ -90,6 +122,7 @@ describe('Payroll APIs', () => {
         month: undefined,
         page: undefined,
         limit: undefined,
+        organizationId: 'org-test-id',
       });
     });
 
@@ -108,6 +141,7 @@ describe('Payroll APIs', () => {
         month: '2026-03',
         page: undefined,
         limit: undefined,
+        organizationId: 'org-test-id',
       });
     });
 
@@ -172,6 +206,24 @@ describe('Payroll APIs', () => {
 
       expect(mockedService.getUserPayrollService).toHaveBeenCalledWith(userId, {
         month: '2026-03',
+        page: undefined,
+        limit: undefined,
+      });
+    });
+  });
+
+  describe('GET /api/v1/payroll/me', () => {
+    it('returns payroll for the authenticated employee', async () => {
+      mockedService.getUserPayrollService.mockResolvedValueOnce({
+        meta: { page: 1, limit: 20, totalRecords: 1, totalPages: 1 },
+        data: [mockPayrollRecord],
+      });
+
+      const res = await request(app).get('/api/v1/payroll/me').expect(200);
+
+      expect(res.body.success).toBe(true);
+      expect(mockedService.getUserPayrollService).toHaveBeenCalledWith(userId, {
+        month: undefined,
         page: undefined,
         limit: undefined,
       });

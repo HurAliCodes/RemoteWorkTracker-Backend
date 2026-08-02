@@ -7,10 +7,13 @@
  *
  * Tables covered (in dependency order):
  *   organizations -> roles -> departments -> users
- *   -> projects -> project_members -> tasks
- *   -> attendance -> goals
+ *   -> projects -> project_members -> tasks -> task_comments
+ *   -> attendance -> goals -> kpis
  *   -> courses -> course_enrollments
  *   -> wellness_logs -> notifications -> payroll
+ *   -> devices -> activity_logs -> idle_logs -> work_sessions
+ *   -> organization_geo_fences -> compliance_* -> performance_reviews
+ *   -> device_push_tokens
  *
  * All seeded users share the password: Password1!
  *
@@ -553,6 +556,343 @@ async function seedPayroll(client: Client, users: User[]) {
 	console.log(`  payroll: ${inserted}`);
 }
 
+type Device = { device_id: string; user_id: string };
+
+async function seedDevices(client: Client, users: User[]): Promise<Device[]> {
+	const existing = await client.query(
+		`SELECT device_id, user_id FROM devices ORDER BY registered_at ASC`
+	);
+	if (existing.rows.length > 0) {
+		console.log(`  devices: ${existing.rows.length} (already existed, skipped)`);
+		return existing.rows;
+	}
+	const devices: Device[] = [];
+	// Pair first 12 employees with a workstation so telemetry APIs have data.
+	const sample = users.filter((u) => u.role_name !== 'Admin').slice(0, 12);
+	for (const [i, user] of sample.entries()) {
+		const insert = await client.query(
+			`INSERT INTO devices (user_id, os, hostname, last_seen, is_active)
+			 VALUES ($1, $2, $3, NOW() - ($4 || ' hours')::interval, true)
+			 RETURNING device_id, user_id`,
+			[user.user_id, i % 2 === 0 ? 'windows' : 'linux', `SEED-PC-${pad(i + 1)}`, String(i % 8)]
+		);
+		devices.push(insert.rows[0]);
+	}
+	console.log(`  devices: ${devices.length}`);
+	return devices;
+}
+
+async function seedActivityAndIdle(client: Client, devices: Device[]) {
+	const existing = await client.query(`SELECT COUNT(*)::int AS count FROM activity_logs`);
+	if (existing.rows[0].count > 0) {
+		console.log(`  activity_logs: ${existing.rows[0].count} (already existed, skipped)`);
+	} else {
+		const apps = ['VS Code', 'Chrome', 'Slack', 'Figma', 'Terminal', 'Outlook'];
+		let inserted = 0;
+		for (const [di, device] of devices.entries()) {
+			for (let day = 0; day < 5; day++) {
+				for (let slot = 0; slot < 4; slot++) {
+					const hoursAgo = day * 24 + slot * 2 + 1;
+					const app = pick(apps, di + day + slot);
+					const start = new Date(Date.now() - hoursAgo * 3600_000);
+					const end = new Date(start.getTime() + (20 + ((di + slot) % 25)) * 60_000);
+					const payload = JSON.stringify({
+						windowTitle: `${app} — seeded`,
+						app,
+						startTime: start.toISOString(),
+						endTime: end.toISOString(),
+						duration: Math.round((end.getTime() - start.getTime()) / 1000),
+						isIdle: false,
+					});
+					await client.query(
+						`INSERT INTO activity_logs (user_id, device_id, action, description, created_at)
+						 VALUES ($1, $2, $3, $4, $5)`,
+						[device.user_id, device.device_id, app.slice(0, 100), payload, end.toISOString()]
+					);
+					inserted++;
+				}
+			}
+		}
+		console.log(`  activity_logs: ${inserted}`);
+	}
+
+	const idleExisting = await client.query(`SELECT COUNT(*)::int AS count FROM idle_logs`);
+	if (idleExisting.rows[0].count > 0) {
+		console.log(`  idle_logs: ${idleExisting.rows[0].count} (already existed, skipped)`);
+		return;
+	}
+	let idleInserted = 0;
+	for (const [di, device] of devices.entries()) {
+		for (let day = 0; day < 5; day++) {
+			await client.query(
+				`INSERT INTO idle_logs (device_id, user_id, idle_time, timestamp)
+				 VALUES ($1, $2, $3, NOW() - ($4 || ' hours')::interval)`,
+				[device.device_id, device.user_id, 60 + ((di + day) % 10) * 30, String(day * 24 + 5)]
+			);
+			idleInserted++;
+		}
+	}
+	console.log(`  idle_logs: ${idleInserted}`);
+}
+
+async function seedWorkSessions(client: Client, projects: Project[], users: User[]) {
+	const existing = await client.query(`SELECT COUNT(*)::int AS count FROM work_sessions`);
+	if (existing.rows[0].count > 0) {
+		console.log(`  work_sessions: ${existing.rows[0].count} (already existed, skipped)`);
+		return;
+	}
+	let inserted = 0;
+	for (const [i, project] of projects.entries()) {
+		const orgUsers = users.filter((u) => u.organization_id === project.organization_id);
+		for (let s = 0; s < 3; s++) {
+			const user = pick(orgUsers, i + s);
+			const start = isoTimestampOffset(-(i + s + 1) * 10);
+			const end = isoTimestampOffset(-(i + s + 1) * 10 + 3);
+			await client.query(
+				`INSERT INTO work_sessions (user_id, project_id, start_time, end_time)
+				 VALUES ($1, $2, $3, $4)`,
+				[user.user_id, project.project_id, start, end]
+			);
+			inserted++;
+		}
+	}
+	console.log(`  work_sessions: ${inserted}`);
+}
+
+async function seedTaskComments(client: Client, users: User[]) {
+	const existing = await client.query(`SELECT COUNT(*)::int AS count FROM task_comments`);
+	if (existing.rows[0].count > 0) {
+		console.log(`  task_comments: ${existing.rows[0].count} (already existed, skipped)`);
+		return;
+	}
+	const tasks = await client.query(`SELECT task_id, assigned_to FROM tasks LIMIT 40`);
+	let inserted = 0;
+	for (const [i, task] of tasks.rows.entries()) {
+		const author = users[i % users.length];
+		await client.query(
+			`INSERT INTO task_comments (task_id, user_id, comment)
+			 VALUES ($1, $2, $3)`,
+			[task.task_id, author.user_id, `Seeded progress note #${i + 1} — looking good.`]
+		);
+		inserted++;
+	}
+	console.log(`  task_comments: ${inserted}`);
+}
+
+async function seedGeoFences(client: Client, orgs: Org[]) {
+	const existing = await client.query(`SELECT COUNT(*)::int AS count FROM organization_geo_fences`);
+	if (existing.rows[0].count > 0) {
+		console.log(`  organization_geo_fences: ${existing.rows[0].count} (already existed, skipped)`);
+		return;
+	}
+	let inserted = 0;
+	for (const [i, org] of orgs.entries()) {
+		await client.query(
+			`INSERT INTO organization_geo_fences (organization_id, name, latitude, longitude, radius_meters)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			[
+				org.organization_id,
+				`${org.name} HQ`,
+				37.7749 + i * 0.1,
+				-122.4194 - i * 0.05,
+				500 + i * 100,
+			]
+		);
+		inserted++;
+	}
+	console.log(`  organization_geo_fences: ${inserted}`);
+}
+
+type Rule = { rule_id: string; organization_id: string };
+
+async function seedCompliance(client: Client, orgs: Org[], users: User[]): Promise<void> {
+	const existing = await client.query(`SELECT COUNT(*)::int AS count FROM compliance_rules`);
+	const rules: Rule[] = [];
+	if (existing.rows[0].count > 0) {
+		const rows = await client.query(
+			`SELECT rule_id, organization_id FROM compliance_rules WHERE organization_id IS NOT NULL`
+		);
+		console.log(`  compliance_rules: ${rows.rows.length} (already existed, skipped)`);
+		rules.push(...rows.rows);
+	} else {
+		for (const org of orgs) {
+			const insert = await client.query(
+				`INSERT INTO compliance_rules
+				 (description, organization_id, region, max_weekly_hours, overtime_allowed, min_break_hours)
+				 VALUES ($1, $2, $3, $4, $5, $6)
+				 RETURNING rule_id, organization_id`,
+				[
+					`Max 45 weekly hours — ${org.name}`,
+					org.organization_id,
+					org.name.toLowerCase().includes('acme') ? 'US' : 'GB',
+					45,
+					true,
+					0.5,
+				]
+			);
+			rules.push(insert.rows[0]);
+			const insert2 = await client.query(
+				`INSERT INTO compliance_rules
+				 (description, organization_id, region, max_weekly_hours, overtime_allowed, min_break_hours)
+				 VALUES ($1, $2, $3, $4, $5, $6)
+				 RETURNING rule_id, organization_id`,
+				[
+					`Mandatory 30-minute break — ${org.name}`,
+					org.organization_id,
+					org.name.toLowerCase().includes('acme') ? 'US' : 'GB',
+					40,
+					false,
+					0.5,
+				]
+			);
+			rules.push(insert2.rows[0]);
+		}
+		console.log(`  compliance_rules: ${rules.length}`);
+	}
+
+	const violExisting = await client.query(`SELECT COUNT(*)::int AS count FROM compliance_violations`);
+	if (violExisting.rows[0].count > 0) {
+		console.log(`  compliance_violations: ${violExisting.rows[0].count} (already existed, skipped)`);
+	} else {
+		let inserted = 0;
+		for (const [i, rule] of rules.entries()) {
+			const orgUsers = users.filter((u) => u.organization_id === rule.organization_id);
+			if (!orgUsers.length) continue;
+			const user = orgUsers[i % orgUsers.length];
+			await client.query(
+				`INSERT INTO compliance_violations
+				 (user_id, rule_id, description, organization_id, status)
+				 VALUES ($1, $2, $3, $4, $5)`,
+				[
+					user.user_id,
+					rule.rule_id,
+					`Seeded overtime / break violation for ${user.name}`,
+					rule.organization_id,
+					i % 2 === 0 ? 'PENDING' : 'RESOLVED',
+				]
+			);
+			inserted++;
+		}
+		console.log(`  compliance_violations: ${inserted}`);
+	}
+
+	const ackExisting = await client.query(
+		`SELECT COUNT(*)::int AS count FROM compliance_acknowledgements`
+	);
+	if (ackExisting.rows[0].count > 0) {
+		console.log(
+			`  compliance_acknowledgements: ${ackExisting.rows[0].count} (already existed, skipped)`
+		);
+		return;
+	}
+	let acks = 0;
+	for (const rule of rules) {
+		const orgUsers = users
+			.filter((u) => u.organization_id === rule.organization_id)
+			.slice(0, 4);
+		for (const user of orgUsers) {
+			await client.query(
+				`INSERT INTO compliance_acknowledgements (user_id, rule_id, signature_data)
+				 VALUES ($1, $2, $3)
+				 ON CONFLICT DO NOTHING`,
+				[user.user_id, rule.rule_id, `seed-sig:${user.user_id}:${rule.rule_id}`]
+			);
+			acks++;
+		}
+	}
+	console.log(`  compliance_acknowledgements: ${acks}`);
+}
+
+async function seedPerformanceReviews(client: Client, orgs: Org[], users: User[]) {
+	const existing = await client.query(`SELECT COUNT(*)::int AS count FROM performance_reviews`);
+	if (existing.rows[0].count > 0) {
+		console.log(`  performance_reviews: ${existing.rows[0].count} (already existed, skipped)`);
+		return;
+	}
+	const period = `${new Date().getUTCFullYear()}-Q${Math.floor(new Date().getUTCMonth() / 3) + 1}`;
+	let inserted = 0;
+	for (const org of orgs) {
+		const orgUsers = users.filter((u) => u.organization_id === org.organization_id);
+		const reviewers = orgUsers.filter((u) => u.role_name === 'Manager' || u.role_name === 'Admin');
+		const reviewer = reviewers[0] || orgUsers[0];
+		for (const [i, user] of orgUsers.slice(0, 8).entries()) {
+			const attendance = 70 + (i % 5) * 5;
+			const tasks = 65 + (i % 6) * 5;
+			const goals = 60 + (i % 7) * 5;
+			const wellness = 75 + (i % 4) * 5;
+			const overall = Math.round(attendance * 0.25 + tasks * 0.35 + goals * 0.25 + wellness * 0.15);
+			await client.query(
+				`INSERT INTO performance_reviews (
+					user_id, reviewer_id, organization_id, period, score, comments,
+					attendance_score, task_completion_score, goal_progress_score, wellness_score,
+					overall_score, status
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+				ON CONFLICT (user_id, period) DO NOTHING`,
+				[
+					user.user_id,
+					reviewer.user_id,
+					org.organization_id,
+					period,
+					overall,
+					`Seeded ${period} review for ${user.name}.`,
+					attendance,
+					tasks,
+					goals,
+					wellness,
+					overall,
+					i % 3 === 0 ? 'FINALIZED' : 'DRAFT',
+				]
+			);
+			inserted++;
+		}
+	}
+	console.log(`  performance_reviews: ${inserted}`);
+}
+
+async function seedKpis(client: Client) {
+	const existing = await client.query(`SELECT COUNT(*)::int AS count FROM kpis`);
+	if (existing.rows[0].count > 0) {
+		console.log(`  kpis: ${existing.rows[0].count} (already existed, skipped)`);
+		return;
+	}
+	const goals = await client.query(`SELECT goal_id, title FROM goals LIMIT 30`);
+	let inserted = 0;
+	for (const [i, g] of goals.rows.entries()) {
+		await client.query(
+			`INSERT INTO kpis (goal_id, title, description, target, progress)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			[
+				g.goal_id,
+				`KPI ${pad(i + 1)}`,
+				`Measurable indicator for ${g.title}`,
+				100,
+				(i * 13) % 101,
+			]
+		);
+		inserted++;
+	}
+	console.log(`  kpis: ${inserted}`);
+}
+
+async function seedPushTokens(client: Client, users: User[]) {
+	const existing = await client.query(`SELECT COUNT(*)::int AS count FROM device_push_tokens`);
+	if (existing.rows[0].count > 0) {
+		console.log(`  device_push_tokens: ${existing.rows[0].count} (already existed, skipped)`);
+		return;
+	}
+	let inserted = 0;
+	for (const [i, user] of users.slice(0, 10).entries()) {
+		await client.query(
+			`INSERT INTO device_push_tokens (user_id, token, platform)
+			 VALUES ($1, $2, $3)
+			 ON CONFLICT DO NOTHING`,
+			[user.user_id, `seed-fcm-token-${user.user_id.slice(0, 8)}-${i}`, i % 2 === 0 ? 'android' : 'ios']
+		);
+		inserted++;
+	}
+	console.log(`  device_push_tokens: ${inserted}`);
+}
+
 async function main() {
 	console.log('Seeding dummy data...');
 	console.log(`Default password for every seeded user: ${SEED_PASSWORD}`);
@@ -576,8 +916,23 @@ async function main() {
 			await seedWellnessLogs(client, users);
 			await seedNotifications(client, users);
 			await seedPayroll(client, users);
+
+			const devices = await seedDevices(client, users);
+			await seedActivityAndIdle(client, devices);
+			await seedWorkSessions(client, projects, users);
+			await seedTaskComments(client, users);
+			await seedGeoFences(client, orgs);
+			await seedCompliance(client, orgs, users);
+			await seedPerformanceReviews(client, orgs, users);
+			await seedKpis(client);
+			await seedPushTokens(client, users);
+
 			await client.query('COMMIT');
 			console.log('Seed complete.');
+			console.log('Sample logins (password Password1!):');
+			console.log('  Org admin portal: admin@acme.test / admin@globex.test (org login)');
+			console.log('  Employee: admin.acmecorporation@example.com');
+			console.log('  Employee: admin.globexinc@example.com');
 		} catch (err) {
 			await client.query('ROLLBACK');
 			throw err;

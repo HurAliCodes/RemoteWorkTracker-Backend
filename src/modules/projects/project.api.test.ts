@@ -2,9 +2,36 @@ import request from 'supertest';
 import express from 'express';
 import projectRouter from './project.routes';
 import * as projectService from './project.service';
+import { errorMiddleware } from '../../middleware/error.middleware';
+import { AppError } from '../../utils/errors';
+import { mapProjectToApi } from './project.mapper';
+import type { ProjectRow } from './project.repository';
 
 jest.mock('../../middleware/auth.middleware', () => ({
-  authenticateJWT: (_req: unknown, _res: unknown, next: () => void) => next(),
+  authenticateJWT: (req: any, _res: unknown, next: () => void) => {
+    req.user = { organizationId: 'org-test', admin: true };
+    next();
+  },
+  requirePortalToken: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireDeviceToken: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireEmployeeToken: (_req: unknown, _res: unknown, next: () => void) => next(),
+}));
+
+jest.mock('../../utils/org-access', () => ({
+  requireCallerOrgId: async (_req: unknown, _res: unknown) => 'org-test',
+  assertResourceInCallerOrg: async () => 'org-test',
+  projectBelongsToOrg: async () => true,
+  taskBelongsToOrg: async () => true,
+  goalBelongsToOrg: async () => true,
+  departmentBelongsToOrg: async () => true,
+  payrollBelongsToOrg: async () => true,
+  attendanceBelongsToOrg: async () => true,
+  userBelongsToOrg: async () => true,
+  courseInstructorInOrg: async () => true,
+}));
+
+jest.mock('../../utils/resolve-org-from-auth', () => ({
+  resolveCallerOrganizationId: async () => 'org-test',
 }));
 jest.mock('uuid', () => ({ v4: () => 'mock-uuid' }));
 jest.mock('./project.service');
@@ -12,6 +39,7 @@ jest.mock('./project.service');
 const app = express();
 app.use(express.json());
 app.use('/api/v1/projects', projectRouter);
+app.use(errorMiddleware);
 
 const mockedService = projectService as jest.Mocked<typeof projectService>;
 
@@ -25,6 +53,21 @@ const validProject = {
 const projectId = '33333333-3333-3333-3333-333333333333';
 const userId = '44444444-4444-4444-4444-444444444444';
 
+function apiProject(overrides: Partial<ProjectRow> = {}) {
+  return mapProjectToApi({
+    project_id: projectId,
+    name: 'Alpha',
+    description: null,
+    manager_id: validProject.manager_id,
+    organization_id: validProject.organization_id,
+    start_date: validProject.start_date,
+    end_date: validProject.end_date,
+    created_at: '2025-01-01T00:00:00.000Z',
+    updated_at: '2025-01-01T00:00:00.000Z',
+    ...overrides,
+  })!;
+}
+
 describe('Project APIs', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -32,10 +75,8 @@ describe('Project APIs', () => {
 
   describe('POST /api/v1/projects', () => {
     it('returns 201 and created project when body is valid', async () => {
-      const created = { ...validProject, project_id: projectId, description: null, created_at: new Date().toISOString() };
-      mockedService.createProjectService.mockResolvedValueOnce(
-        created as Awaited<ReturnType<typeof projectService.createProjectService>>,
-      );
+      const created = apiProject();
+      mockedService.createProjectService.mockResolvedValueOnce(created);
 
       const res = await request(app)
         .post('/api/v1/projects')
@@ -45,27 +86,31 @@ describe('Project APIs', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.message).toBe('Project created successfully');
       expect(res.body.data.project_id).toBe(projectId);
+      expect(res.body.data.projectId).toBe(projectId);
       expect(res.body.data.name).toBe(validProject.name);
       expect(mockedService.createProjectService).toHaveBeenCalledWith({
         name: validProject.name,
         description: undefined,
         manager_id: validProject.manager_id,
-        organization_id: validProject.organization_id,
+        organization_id: 'org-test',
         start_date: validProject.start_date,
         end_date: validProject.end_date,
       });
     });
 
-    it('returns 400 when service throws', async () => {
-      mockedService.createProjectService.mockRejectedValueOnce(new Error('Organization not found.'));
+    it('returns 404 when service throws AppError.notFound', async () => {
+      mockedService.createProjectService.mockRejectedValueOnce(
+        AppError.notFound('Organization not found.', 'ORG_NOT_FOUND')
+      );
 
       const res = await request(app)
         .post('/api/v1/projects')
         .send(validProject)
-        .expect(400);
+        .expect(404);
 
       expect(res.body.success).toBe(false);
       expect(res.body.message).toContain('Organization not found');
+      expect(res.body.code).toBe('ORG_NOT_FOUND');
     });
   });
 
@@ -73,7 +118,7 @@ describe('Project APIs', () => {
     it('returns 200 and list with meta when service returns data', async () => {
       const list = {
         meta: { page: 1, limit: 20, totalRecords: 1, totalPages: 1 },
-        data: [{ project_id: projectId, name: 'Alpha', description: null, manager_id: validProject.manager_id, organization_id: validProject.organization_id, start_date: validProject.start_date, end_date: validProject.end_date, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }],
+        data: [apiProject()],
       };
       mockedService.getAllProjectsService.mockResolvedValueOnce(list);
 
@@ -85,10 +130,10 @@ describe('Project APIs', () => {
       expect(res.body.data.meta).toEqual(list.meta);
       expect(res.body.data.data).toHaveLength(1);
       expect(res.body.data.data[0].name).toBe('Alpha');
-      expect(mockedService.getAllProjectsService).toHaveBeenCalledWith({ page: undefined, limit: undefined, organization_id: undefined });
+      expect(mockedService.getAllProjectsService).toHaveBeenCalledWith({ page: undefined, limit: undefined, organization_id: 'org-test' });
     });
 
-    it('passes query params page, limit, organization_id', async () => {
+    it('passes query params page, limit and forces caller organization', async () => {
       mockedService.getAllProjectsService.mockResolvedValueOnce({ meta: { page: 2, limit: 10, totalRecords: 0, totalPages: 0 }, data: [] });
 
       await request(app)
@@ -98,16 +143,16 @@ describe('Project APIs', () => {
       expect(mockedService.getAllProjectsService).toHaveBeenCalledWith({
         page: 2,
         limit: 10,
-        organization_id: 'org-123',
+        organization_id: 'org-test',
       });
     });
 
-    it('returns 400 when service throws', async () => {
+    it('returns 500 when service throws unexpected error', async () => {
       mockedService.getAllProjectsService.mockRejectedValueOnce(new Error('DB error'));
 
       const res = await request(app)
         .get('/api/v1/projects')
-        .expect(400);
+        .expect(500);
 
       expect(res.body.success).toBe(false);
     });
@@ -115,7 +160,7 @@ describe('Project APIs', () => {
 
   describe('GET /api/v1/projects/:id', () => {
     it('returns 200 and project when found', async () => {
-      const project = { project_id: projectId, name: 'Alpha', description: null, manager_id: validProject.manager_id, organization_id: validProject.organization_id, start_date: validProject.start_date, end_date: validProject.end_date, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+      const project = apiProject();
       mockedService.getProjectByIdService.mockResolvedValueOnce(project);
 
       const res = await request(app)
@@ -135,11 +180,11 @@ describe('Project APIs', () => {
         .expect(404);
 
       expect(res.body.success).toBe(false);
-      expect(res.body.message).toBe('Project not found');
+      expect(res.body.message).toBe('Project not found.');
     });
 
-    it('returns 400 when service throws', async () => {
-      mockedService.getProjectByIdService.mockRejectedValueOnce(new Error('Invalid id'));
+    it('returns 400 when service throws AppError.badRequest', async () => {
+      mockedService.getProjectByIdService.mockRejectedValueOnce(AppError.badRequest('Invalid id'));
 
       await request(app)
         .get(`/api/v1/projects/${projectId}`)
@@ -149,7 +194,7 @@ describe('Project APIs', () => {
 
   describe('PATCH /api/v1/projects/:id', () => {
     it('returns 200 and updated project when body is valid', async () => {
-      const updated = { project_id: projectId, name: 'Beta', description: 'Updated', manager_id: validProject.manager_id, organization_id: validProject.organization_id, start_date: validProject.start_date, end_date: validProject.end_date, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+      const updated = apiProject({ name: 'Beta', description: 'Updated' });
       mockedService.updateProjectService.mockResolvedValueOnce(updated);
 
       const res = await request(app)
@@ -163,7 +208,9 @@ describe('Project APIs', () => {
     });
 
     it('returns 404 when project not found', async () => {
-      mockedService.updateProjectService.mockRejectedValueOnce(new Error('Project not found.'));
+      mockedService.updateProjectService.mockRejectedValueOnce(
+        AppError.notFound('Project not found.', 'PROJECT_NOT_FOUND')
+      );
 
       const res = await request(app)
         .patch(`/api/v1/projects/${projectId}`)
@@ -171,11 +218,13 @@ describe('Project APIs', () => {
         .expect(404);
 
       expect(res.body.success).toBe(false);
-      expect(res.body.message).toBe('Project not found');
+      expect(res.body.message).toBe('Project not found.');
     });
 
     it('returns 400 when service throws other error', async () => {
-      mockedService.updateProjectService.mockRejectedValueOnce(new Error('Invalid start_date.'));
+      mockedService.updateProjectService.mockRejectedValueOnce(
+        AppError.badRequest('Invalid start_date.')
+      );
 
       const res = await request(app)
         .patch(`/api/v1/projects/${projectId}`)
@@ -196,18 +245,23 @@ describe('Project APIs', () => {
 
       expect(res.body.success).toBe(true);
       expect(res.body.data.message).toContain('deleted');
-      expect(mockedService.deleteProjectService).toHaveBeenCalledWith(projectId);
+      expect(mockedService.deleteProjectService).toHaveBeenCalledWith(projectId, {
+        organizationId: 'org-test',
+        userId: undefined,
+      });
     });
 
     it('returns 404 when project not found', async () => {
-      mockedService.deleteProjectService.mockRejectedValueOnce(new Error('Project not found.'));
+      mockedService.deleteProjectService.mockRejectedValueOnce(
+        AppError.notFound('Project not found.', 'PROJECT_NOT_FOUND')
+      );
 
       const res = await request(app)
         .delete(`/api/v1/projects/${projectId}`)
         .expect(404);
 
       expect(res.body.success).toBe(false);
-      expect(res.body.message).toBe('Project not found');
+      expect(res.body.message).toBe('Project not found.');
     });
   });
 });
@@ -230,7 +284,9 @@ describe('Project Member APIs', () => {
     });
 
     it('returns 404 when project not found', async () => {
-      mockedService.listProjectMembersService.mockRejectedValueOnce(new Error('Project not found.'));
+      mockedService.listProjectMembersService.mockRejectedValueOnce(
+        AppError.notFound('Project not found.', 'PROJECT_NOT_FOUND')
+      );
 
       const res = await request(app)
         .get(`/api/v1/projects/${projectId}/members`)
@@ -268,7 +324,9 @@ describe('Project Member APIs', () => {
     });
 
     it('returns 404 when project not found', async () => {
-      mockedService.addProjectMemberService.mockRejectedValueOnce(new Error('Project not found.'));
+      mockedService.addProjectMemberService.mockRejectedValueOnce(
+        AppError.notFound('Project not found.', 'PROJECT_NOT_FOUND')
+      );
 
       const res = await request(app)
         .post(`/api/v1/projects/${projectId}/members`)
@@ -276,11 +334,13 @@ describe('Project Member APIs', () => {
         .expect(404);
 
       expect(res.body.success).toBe(false);
-      expect(res.body.message).toBe('Project not found');
+      expect(res.body.message).toBe('Project not found.');
     });
 
     it('returns 409 when user already member', async () => {
-      mockedService.addProjectMemberService.mockRejectedValueOnce(new Error('User is already a member of this project.'));
+      mockedService.addProjectMemberService.mockRejectedValueOnce(
+        AppError.conflict('User is already a member of this project.')
+      );
 
       const res = await request(app)
         .post(`/api/v1/projects/${projectId}/members`)
@@ -305,18 +365,22 @@ describe('Project Member APIs', () => {
     });
 
     it('returns 404 when project not found', async () => {
-      mockedService.removeProjectMemberService.mockRejectedValueOnce(new Error('Project not found.'));
+      mockedService.removeProjectMemberService.mockRejectedValueOnce(
+        AppError.notFound('Project not found.', 'PROJECT_NOT_FOUND')
+      );
 
       const res = await request(app)
         .delete(`/api/v1/projects/${projectId}/members/${userId}`)
         .expect(404);
 
       expect(res.body.success).toBe(false);
-      expect(res.body.message).toBe('Project not found');
+      expect(res.body.message).toBe('Project not found.');
     });
 
     it('returns 404 when project member not found', async () => {
-      mockedService.removeProjectMemberService.mockRejectedValueOnce(new Error('Project member not found.'));
+      mockedService.removeProjectMemberService.mockRejectedValueOnce(
+        AppError.notFound('Project member not found.')
+      );
 
       const res = await request(app)
         .delete(`/api/v1/projects/${projectId}/members/${userId}`)

@@ -3,7 +3,7 @@ import request from 'supertest';
 import goalRouter from './goal.routes';
 import * as goalService from './goal.service';
 
-const TEST_ORG_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+const TEST_ORG_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
 jest.mock('uuid', () => ({ v4: () => 'mock-goal-uuid' }));
 jest.mock('./goal.service');
@@ -12,6 +12,26 @@ jest.mock('../../middleware/auth.middleware', () => ({
     req.user = { organizationId: TEST_ORG_ID, admin: true };
     next();
   },
+  requirePortalToken: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireDeviceToken: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireEmployeeToken: (_req: unknown, _res: unknown, next: () => void) => next(),
+}));
+
+jest.mock('../../utils/org-access', () => ({
+  requireCallerOrgId: async (_req: unknown, _res: unknown) => 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  assertResourceInCallerOrg: async () => 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  projectBelongsToOrg: async () => true,
+  taskBelongsToOrg: async () => true,
+  goalBelongsToOrg: async () => true,
+  departmentBelongsToOrg: async () => true,
+  payrollBelongsToOrg: async () => true,
+  attendanceBelongsToOrg: async () => true,
+  userBelongsToOrg: async () => true,
+  courseInstructorInOrg: async () => true,
+}));
+
+jest.mock('../../utils/resolve-org-from-auth', () => ({
+  resolveCallerOrganizationId: async () => TEST_ORG_ID,
 }));
 
 const app = express();
@@ -20,8 +40,8 @@ app.use('/api/v1/goals', goalRouter);
 
 const mockedService = goalService as jest.Mocked<typeof goalService>;
 
-const goalId = '33333333-3333-3333-3333-333333333333';
-const userId = '11111111-1111-1111-1111-111111111111';
+const goalId = '33333333-3333-4333-8333-333333333333';
+const userId = '11111111-1111-4111-8111-111111111111';
 const validCreatePayload = {
   title: 'Improve code quality',
   userId,

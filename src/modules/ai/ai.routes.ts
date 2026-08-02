@@ -1,5 +1,6 @@
 import { Router } from 'express';
-import { authenticateJWT } from '../../middleware/auth.middleware';
+import { authenticateJWT, requirePortalToken } from '../../middleware/auth.middleware';
+import { aiHeavyRateLimiter } from '../../middleware/rateLimit.middleware';
 import {
 	enqueueAnalyticsReportController,
 	generateAnalyticsReportController,
@@ -13,12 +14,12 @@ import {
 
 const router = Router();
 
-router.use(authenticateJWT);
+router.use(authenticateJWT, requirePortalToken);
 router.post('/employee-data', syncEmployeeDataController);
 router.post('/task-data', syncTaskDataController);
-router.post('/report', generateAnalyticsReportController);
-router.post('/report/enqueue', enqueueAnalyticsReportController);
-router.post('/report/replay', replayAnalyticsReportController);
+router.post('/report', aiHeavyRateLimiter, generateAnalyticsReportController);
+router.post('/report/enqueue', aiHeavyRateLimiter, enqueueAnalyticsReportController);
+router.post('/report/replay', aiHeavyRateLimiter, replayAnalyticsReportController);
 router.get('/report/dlq', inspectDlqController);
 router.post('/report/dlq/replay', replayDlqController);
 router.get('/reports/:employeeId', getWeeklyReportsController);

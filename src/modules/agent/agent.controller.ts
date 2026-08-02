@@ -4,11 +4,13 @@ import {
   saveDevice,
   findDevice,
   updateDeviceStatus,
-  saveActivityLog,
   saveIdleLog,
   createPairingCodeRecord,
   consumePairingCodeRecord,
   deleteExpiredPairingCodeRecords,
+  setDeviceRefreshTokenHash,
+  clearDeviceRefreshTokenHash,
+  hashRefreshToken,
 } from './agent.repository';
 
 import {
@@ -17,9 +19,11 @@ import {
   activitySchema,
   idleSchema,
   createPairingCodeSchema,
+  refreshDeviceTokenSchema,
 } from './agent.validation';
-import { normalizeActivityRecord } from './agent.mapper';
 import { AuthRequest } from '../../middleware/auth.middleware';
+import { readTokenTyp, signAccessToken, signRefreshToken, verifyRefreshToken } from '../../utils/jwt';
+import { recordActivityBatch } from './agent.service';
 
 function isUuid(value: unknown): boolean {
   if (typeof value !== 'string') return false;
@@ -49,40 +53,96 @@ async function resolveUserIdFromPairingCode(pairingCode?: string): Promise<strin
   return record.user_id;
 }
 
+function assertDeviceMatchesToken(req: AuthRequest, deviceId: string): boolean {
+  const tokenDeviceId = req.user?.deviceId;
+  return typeof tokenDeviceId === 'string' && tokenDeviceId === deviceId;
+}
+
 export const registerDevice = async (req: Request, res: Response) => {
   const parseResult = registerDeviceSchema.safeParse(req.body);
   if (!parseResult.success) {
     return res.status(400).json({ error: parseResult.error.flatten() });
   }
-  const { deviceId, userId, pairingCode, hostname, os } = parseResult.data;
-  const resolvedUserId = userId || await resolveUserIdFromPairingCode(pairingCode);
+  const { deviceId, pairingCode, hostname, os } = parseResult.data;
+  const resolvedUserId = await resolveUserIdFromPairingCode(pairingCode);
   if (!resolvedUserId) {
     return res.status(400).json({
       error: 'Invalid or expired pairing code. Generate a new pairing code and try again.',
     });
   }
-  let device = await findDevice(deviceId);
-  if (!device) {
-    device = {
-      deviceId,
-      userId: resolvedUserId,
-      hostname,
-      os,
-      status: 'online',
-      lastSeen: new Date().toISOString(),
-    };
-    device = await saveDevice(device);
+  const existing = await findDevice(deviceId);
+  if (existing && existing.user_id !== resolvedUserId) {
+    return res.status(409).json({ error: 'Device is already registered to another user.' });
   }
-  const { signAccessToken, signRefreshToken } = await import('../../utils/jwt');
-  const payload = { deviceId: device.device_id || device.deviceId, userId: device.user_id || device.userId };
-  const accessToken = signAccessToken(payload);
-  const refreshToken = signRefreshToken(payload);
+  const device = await saveDevice({
+    deviceId,
+    userId: resolvedUserId,
+    hostname,
+    os,
+    status: 'online',
+    lastSeen: new Date().toISOString(),
+  });
+  const payload = {
+    deviceId: device.device_id || deviceId,
+    userId: device.user_id || resolvedUserId,
+  };
+  const accessToken = signAccessToken(payload, '15m', 'device');
+  const refreshToken = signRefreshToken(payload, '7d', 'device');
+  await setDeviceRefreshTokenHash(device.device_id || deviceId, hashRefreshToken(refreshToken));
   return res.json({
-    deviceId: device.device_id || device.deviceId,
-    userId: device.user_id || device.userId,
+    deviceId: device.device_id || deviceId,
+    userId: device.user_id || resolvedUserId,
     accessToken,
     refreshToken,
   });
+};
+
+export const refreshDeviceToken = async (req: Request, res: Response) => {
+  const parseResult = refreshDeviceTokenSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({ error: parseResult.error.flatten() });
+  }
+  try {
+    const payload = verifyRefreshToken(parseResult.data.refreshToken) as {
+      deviceId?: string;
+      userId?: string;
+      typ?: string;
+    };
+    if (readTokenTyp(payload as Record<string, unknown>) !== 'device') {
+      return res.status(401).json({ error: 'Invalid refresh token' });
+    }
+    if (!payload?.deviceId || !payload?.userId) {
+      return res.status(401).json({ error: 'Invalid refresh token' });
+    }
+    const device = await findDevice(payload.deviceId);
+    if (!device || device.user_id !== payload.userId) {
+      return res.status(401).json({ error: 'Device not found for refresh token' });
+    }
+    const presentedHash = hashRefreshToken(parseResult.data.refreshToken);
+    if (!device.refresh_token_hash || device.refresh_token_hash !== presentedHash) {
+      return res.status(401).json({ error: 'Refresh token revoked or invalid' });
+    }
+    const nextPayload = { deviceId: payload.deviceId, userId: payload.userId };
+    const accessToken = signAccessToken(nextPayload, '15m', 'device');
+    const refreshToken = signRefreshToken(nextPayload, '7d', 'device');
+    await setDeviceRefreshTokenHash(payload.deviceId, hashRefreshToken(refreshToken));
+    return res.json({
+      accessToken,
+      refreshToken,
+      expiresIn: 900,
+    });
+  } catch {
+    return res.status(401).json({ error: 'Invalid or expired refresh token' });
+  }
+};
+
+export const revokeDeviceRefresh = async (req: AuthRequest, res: Response) => {
+  const deviceId = req.user?.deviceId;
+  if (!deviceId) {
+    return res.status(403).json({ error: 'Device token required' });
+  }
+  await clearDeviceRefreshTokenHash(deviceId);
+  return res.json({ status: 'ok', revoked: true });
 };
 
 export const createPairingCode = async (req: AuthRequest, res: Response) => {
@@ -124,48 +184,61 @@ export const createPairingCode = async (req: AuthRequest, res: Response) => {
   });
 };
 
-export const heartbeat = async (req: Request, res: Response) => {
+export const heartbeat = async (req: AuthRequest, res: Response) => {
   const parseResult = heartbeatSchema.safeParse(req.body);
   if (!parseResult.success) {
     return res.status(400).json({ error: parseResult.error.flatten() });
   }
   const { deviceId, status } = parseResult.data;
+  if (!assertDeviceMatchesToken(req, deviceId)) {
+    return res.status(403).json({ error: 'Token does not match deviceId' });
+  }
   const device = await updateDeviceStatus(deviceId, status || 'online');
   if (!device) {
     return res.status(404).json({ error: 'Device not found' });
   }
   return res.json({ status: 'ok', device });
 };
-export const activity = async (req: Request, res: Response) => {
+
+export const activity = async (req: AuthRequest, res: Response) => {
   const parseResult = activitySchema.safeParse(req.body);
   if (!parseResult.success) {
     return res.status(400).json({ error: parseResult.error.flatten() });
   }
-  const { activities } = parseResult.data;
-  let saved = 0;
-  for (const log of activities) {
-    const row = normalizeActivityRecord(log);
-    if (row) {
-      await saveActivityLog(row);
-      saved += 1;
-    }
+  const tokenDeviceId = req.user?.deviceId;
+  const tokenUserId = req.user?.userId;
+  if (!tokenDeviceId || !tokenUserId) {
+    return res.status(403).json({ error: 'Device token required' });
   }
-  return res.json({ status: 'ok', count: saved, received: activities.length });
+
+  const idempotencyKey =
+    (req.header('idempotency-key') || req.header('Idempotency-Key') || '').trim() ||
+    (typeof (req.body as { idempotencyKey?: string })?.idempotencyKey === 'string'
+      ? String((req.body as { idempotencyKey?: string }).idempotencyKey).trim()
+      : '');
+
+  const response = await recordActivityBatch({
+    tokenDeviceId,
+    tokenUserId,
+    activities: parseResult.data.activities,
+    idempotencyKey: idempotencyKey || undefined,
+  });
+
+  return res.json(response);
 };
 
-export const idle = async (req: Request, res: Response) => {
+export const idle = async (req: AuthRequest, res: Response) => {
   const parseResult = idleSchema.safeParse(req.body);
   if (!parseResult.success) {
     return res.status(400).json({ error: parseResult.error.flatten() });
   }
-  const { deviceId, idleDuration, idleTime, userId: bodyUserId, timestamp } = parseResult.data;
-  let userId = bodyUserId;
+  const { deviceId, idleDuration, idleTime, timestamp } = parseResult.data;
+  if (!assertDeviceMatchesToken(req, deviceId)) {
+    return res.status(403).json({ error: 'Token does not match deviceId' });
+  }
+  const userId = req.user?.userId;
   if (!userId) {
-    const device = await findDevice(deviceId);
-    if (!device) {
-      return res.status(404).json({ error: 'Device not found; register the device first' });
-    }
-    userId = device.user_id;
+    return res.status(403).json({ error: 'Device token missing userId' });
   }
   const seconds = Math.round(idleDuration ?? idleTime ?? 0);
   const ts = timestamp ?? new Date().toISOString();

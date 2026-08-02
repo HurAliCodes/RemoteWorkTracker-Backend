@@ -6,12 +6,18 @@ export type TaskAttachmentRow = Record<string, unknown>;
 
 /** Lookups for service validation (existence checks) */
 export async function findProjectById(projectId: string): Promise<Record<string, unknown> | null> {
-  const result = await pool.query('SELECT * FROM projects WHERE project_id = $1 LIMIT 1', [projectId]);
+  const result = await pool.query(
+    'SELECT * FROM projects WHERE project_id = $1 AND deleted_at IS NULL LIMIT 1',
+    [projectId]
+  );
   return result.rows[0] ?? null;
 }
 
 export async function findUserById(userId: string): Promise<Record<string, unknown> | null> {
-  const result = await pool.query('SELECT * FROM users WHERE user_id = $1 LIMIT 1', [userId]);
+  const result = await pool.query(
+    'SELECT * FROM users WHERE user_id = $1 AND deleted_at IS NULL LIMIT 1',
+    [userId]
+  );
   return result.rows[0] ?? null;
 }
 
@@ -47,40 +53,75 @@ export async function insertTask(row: {
 }
 
 export async function findTaskById(taskId: string): Promise<TaskRow | null> {
-  const result = await pool.query('SELECT * FROM tasks WHERE task_id = $1 LIMIT 1', [taskId]);
+  const result = await pool.query(
+    'SELECT * FROM tasks WHERE task_id = $1 AND deleted_at IS NULL LIMIT 1',
+    [taskId]
+  );
   return result.rows[0] ?? null;
 }
 
-export async function countTasks(projectId?: string): Promise<number> {
-  const hasProject = projectId && projectId.length > 0;
-  const query = hasProject
-    ? 'SELECT COUNT(*) FROM tasks t WHERE t.project_id = $1'
-    : 'SELECT COUNT(*) FROM tasks t';
-  const params = hasProject ? [projectId] : [];
-  const result = await pool.query(query, params);
+export async function countTasks(
+  projectId?: string,
+  organizationId?: string,
+  assignedTo?: string
+): Promise<number> {
+  const conditions: string[] = ['t.deleted_at IS NULL'];
+  const params: unknown[] = [];
+  if (organizationId) {
+    params.push(organizationId);
+    conditions.push(
+      `EXISTS (SELECT 1 FROM projects p WHERE p.project_id = t.project_id AND p.organization_id = $${params.length} AND p.deleted_at IS NULL)`
+    );
+  }
+  if (projectId && projectId.length > 0) {
+    params.push(projectId);
+    conditions.push(`t.project_id = $${params.length}`);
+  }
+  if (assignedTo && assignedTo.length > 0) {
+    params.push(assignedTo);
+    conditions.push(`t.assigned_to = $${params.length}`);
+  }
+  const whereClause = `WHERE ${conditions.join(' AND ')}`;
+  const result = await pool.query(`SELECT COUNT(*) FROM tasks t ${whereClause}`, params);
   return parseInt(result.rows[0].count as string, 10);
 }
 
 export async function listTasksPaginated(opts: {
   projectId?: string;
+  organizationId?: string;
+  assignedTo?: string;
   limit: number;
   offset: number;
 }): Promise<TaskRow[]> {
-  const hasProject = opts.projectId && opts.projectId.length > 0;
-  const whereClause = hasProject ? 'WHERE t.project_id = $1' : '';
-  const listParams = hasProject
-    ? [opts.projectId, opts.limit, opts.offset]
-    : [opts.limit, opts.offset];
-  const listPlaceholders = hasProject ? 'LIMIT $2 OFFSET $3' : 'LIMIT $1 OFFSET $2';
-
+  const conditions: string[] = ['t.deleted_at IS NULL'];
+  const params: unknown[] = [];
+  if (opts.organizationId) {
+    params.push(opts.organizationId);
+    conditions.push(
+      `EXISTS (SELECT 1 FROM projects p WHERE p.project_id = t.project_id AND p.organization_id = $${params.length} AND p.deleted_at IS NULL)`
+    );
+  }
+  if (opts.projectId && opts.projectId.length > 0) {
+    params.push(opts.projectId);
+    conditions.push(`t.project_id = $${params.length}`);
+  }
+  if (opts.assignedTo && opts.assignedTo.length > 0) {
+    params.push(opts.assignedTo);
+    conditions.push(`t.assigned_to = $${params.length}`);
+  }
+  const whereClause = `WHERE ${conditions.join(' AND ')}`;
+  params.push(opts.limit);
+  const limitIdx = params.length;
+  params.push(opts.offset);
+  const offsetIdx = params.length;
   const listQuery = `
     SELECT t.task_id, t.project_id, t.assigned_to, t.title, t.description, t.status, t.priority, t.deadline, t.created_at, t.updated_at
     FROM tasks t
     ${whereClause}
     ORDER BY t.created_at DESC
-    ${listPlaceholders}
+    LIMIT $${limitIdx} OFFSET $${offsetIdx}
   `;
-  const listResult = await pool.query(listQuery, listParams);
+  const listResult = await pool.query(listQuery, params);
   return listResult.rows;
 }
 
@@ -145,6 +186,14 @@ export async function insertTaskAttachment(row: {
      VALUES ($1, $2, $3, $4, $5)`,
     [row.attachment_id, row.task_id, row.file_path, row.created_at, row.updated_at]
   );
+}
+
+export async function listTaskAttachments(taskId: string): Promise<TaskAttachmentRow[]> {
+  const result = await pool.query(
+    'SELECT * FROM task_attachments WHERE task_id = $1 ORDER BY created_at DESC',
+    [taskId]
+  );
+  return result.rows;
 }
 
 export async function findTaskAttachmentById(attachmentId: string): Promise<TaskAttachmentRow | null> {

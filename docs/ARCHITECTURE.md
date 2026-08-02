@@ -37,6 +37,23 @@ This document provides a highlevel architecture overview of the backend system, 
  Logging: Winston
 
 ## 4. Key Architectural Patterns
+
+### Layer rules (controller → service → repository)
+- **Controller**: HTTP only — parse/validate input, auth/org guards, call service, map status codes via helpers. No SQL.
+- **Service**: Business rules, transactions, events. Throws `AppError` for expected failures.
+- **Repository**: SQL / DB access only. No HTTP types.
+- **Mapper**: Snake_case DB rows ↔ camelCase API DTOs (keep snake aliases where clients still dual-read).
+
+### Response envelope
+Portal/admin APIs use a single shape:
+- Success: `{ success: true, data, message? }`
+- Error (middleware / `error()` helper): `{ success: false, message, code?, errors? }`
+
+**Exception — device agent routes** (`/agent/*`): keep flat JSON (`{ status, count, … }` or `{ error }`) for the Go agent. Prefer extracting logic into `agent.service` / `agent.repository` so controllers stay thin without changing the wire format.
+
+### Config
+Typed `ENV` from Zod (`src/config/env.ts`) is the source of truth at startup (`assertRequiredEnv`). Prefer `ENV.*` over raw `process.env` in app code (Redis, RabbitMQ, FCM, AI knobs).
+
  RoleBased Access Control: All modules enforce access based on user roles (SUPER_ADMIN, ADMIN, MANAGER, EMPLOYEE).
  Modular REST APIs: Each business domain is encapsulated in its own module with clear routes and validation.
  Meta Pagination: List endpoints return meta info (page, limit, totalRecords, totalPages).

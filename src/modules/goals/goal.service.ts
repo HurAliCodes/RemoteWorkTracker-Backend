@@ -159,8 +159,11 @@ export async function deleteGoalService(goalId: string) {
   const existing = await db.findOne('goals', { goal_id: goalId });
   if (!existing) throw new Error('Goal not found.');
 
-  await pool.query('DELETE FROM kpis WHERE goal_id = $1', [goalId]);
-  await pool.query('DELETE FROM goals WHERE goal_id = $1', [goalId]);
+  const { withTransaction } = await import('../../utils/withTransaction');
+  await withTransaction(async (client) => {
+    await client.query('DELETE FROM kpis WHERE goal_id = $1', [goalId]);
+    await client.query('DELETE FROM goals WHERE goal_id = $1', [goalId]);
+  });
   logger.info('Goal deleted', { goal_id: goalId });
 
   return { message: 'Goal deleted successfully' };

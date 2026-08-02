@@ -3,6 +3,7 @@ import { ENV } from '../../config/env';
 import logger from '../../config/logger';
 import type { EmployeeSyncInput } from './ai.mapper';
 import { mapEmployeeInputToAiPayload, mapReportInputToAiPayload, mapTaskInputToAiPayload } from './ai.mapper';
+import { fetchWithResilience, HttpClientError, readJsonSafe } from '../../utils/httpClient';
 
 type AiLoginResponse = {
 	data?: {
@@ -18,10 +19,12 @@ type CachedToken = {
 
 /** Per-organization AI JWTs: token `tenant_id` must match request payload, so never reuse across tenants. */
 const aiTokenByTenantId = new Map<string, CachedToken>();
+const aiTokenInFlight = new Map<string, Promise<string>>();
 
 /** Clears cached AI service Bearer tokens (for tests / hot reload isolation). Safe to call anytime. */
 export function clearAiServiceTokenCache(): void {
 	aiTokenByTenantId.clear();
+	aiTokenInFlight.clear();
 }
 
 export class AiServiceError extends Error {
@@ -44,16 +47,28 @@ function sanitizeBaseUrl(raw: string): string {
 }
 
 export function isAiIntegrationConfigured(): boolean {
-	return Boolean(
-		ENV.AI_SERVER_BASE_URL &&
-		ENV.AI_SERVICE_CLIENT_ID &&
-		ENV.AI_SERVICE_CLIENT_SECRET
-	);
+	return Boolean(ENV.AI_SERVER_BASE_URL && ENV.AI_SERVICE_CLIENT_ID && ENV.AI_SERVICE_CLIENT_SECRET);
 }
 
-function buildIdempotencyKey(parts: Array<string | number>): string {
+export function buildIdempotencyKey(parts: Array<string | number>): string {
 	const value = parts.join(':');
 	return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+/** Stable content hash for logical sync/report dedupe (not random UUIDs). */
+export function buildContentHash(payload: unknown): string {
+	return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 32);
+}
+
+function aiHttpOpts() {
+	return {
+		timeoutMs: ENV.AI_HTTP_TIMEOUT_MS,
+		maxRetries: ENV.AI_HTTP_MAX_RETRIES,
+		baseDelayMs: ENV.AI_HTTP_BASE_DELAY_MS,
+		circuitFailureThreshold: ENV.AI_CIRCUIT_FAILURE_THRESHOLD,
+		circuitCoolDownMs: ENV.AI_CIRCUIT_COOLDOWN_MS,
+		circuitKey: 'ai-server',
+	};
 }
 
 async function getAiToken(tenantId: string): Promise<string> {
@@ -66,37 +81,60 @@ async function getAiToken(tenantId: string): Promise<string> {
 		return cached.token;
 	}
 
-	if (!ENV.AI_SERVICE_CLIENT_ID || !ENV.AI_SERVICE_CLIENT_SECRET) {
-		throw new AiServiceError('AI service credentials are missing in backend environment.', 500);
-	}
+	const inflight = aiTokenInFlight.get(tenantId);
+	if (inflight) return inflight;
 
-	const loginResponse = await fetch(`${sanitizeBaseUrl(ENV.AI_SERVER_BASE_URL)}/api/v1/auth/login`, {
-		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({
-			client_id: ENV.AI_SERVICE_CLIENT_ID,
-			client_secret: ENV.AI_SERVICE_CLIENT_SECRET,
-			tenant_id: tenantId,
-			scopes: ENV.AI_DEFAULT_SCOPES.split(' ').filter(Boolean),
-		}),
+	const pending = (async () => {
+		if (!ENV.AI_SERVICE_CLIENT_ID || !ENV.AI_SERVICE_CLIENT_SECRET) {
+			throw new AiServiceError('AI service credentials are missing in backend environment.', 500);
+		}
+
+		const loginUrl = `${sanitizeBaseUrl(ENV.AI_SERVER_BASE_URL)}/api/v1/auth/login`;
+		let loginResponse: Response;
+		try {
+			loginResponse = await fetchWithResilience(
+				loginUrl,
+				{
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({
+						client_id: ENV.AI_SERVICE_CLIENT_ID,
+						client_secret: ENV.AI_SERVICE_CLIENT_SECRET,
+						tenant_id: tenantId,
+						scopes: ENV.AI_DEFAULT_SCOPES.split(' ').filter(Boolean),
+					}),
+				},
+				aiHttpOpts()
+			);
+		} catch (err) {
+			if (err instanceof HttpClientError) {
+				throw new AiServiceError(err.message, err.status || 503, { errorCode: 'AI_HTTP_FAILURE' });
+			}
+			throw err;
+		}
+
+		const body = (await readJsonSafe(loginResponse)) as AiLoginResponse & Record<string, unknown>;
+		if (!loginResponse.ok || !body?.data?.access_token) {
+			throw new AiServiceError('Failed to obtain AI service token.', loginResponse.status, {
+				errorCode: (body?.error_code as string | undefined) ?? 'AI_AUTH_FAILURE',
+				traceId: body?.trace_id as string | undefined,
+				meta: body?.meta,
+			});
+		}
+
+		const expiresIn = Number(body.data.expires_in ?? 3600);
+		const entry: CachedToken = {
+			token: body.data.access_token,
+			expiresAtEpochSec: Math.floor(Date.now() / 1000) + expiresIn,
+		};
+		aiTokenByTenantId.set(tenantId, entry);
+		return entry.token;
+	})().finally(() => {
+		aiTokenInFlight.delete(tenantId);
 	});
 
-	const body = (await loginResponse.json()) as AiLoginResponse & Record<string, unknown>;
-	if (!loginResponse.ok || !body?.data?.access_token) {
-		throw new AiServiceError('Failed to obtain AI service token.', loginResponse.status, {
-			errorCode: (body?.error_code as string | undefined) ?? 'AI_AUTH_FAILURE',
-			traceId: body?.trace_id as string | undefined,
-			meta: body?.meta,
-		});
-	}
-
-	const expiresIn = Number(body.data.expires_in ?? 3600);
-	const entry: CachedToken = {
-		token: body.data.access_token,
-		expiresAtEpochSec: now + expiresIn,
-	};
-	aiTokenByTenantId.set(tenantId, entry);
-	return entry.token;
+	aiTokenInFlight.set(tenantId, pending);
+	return pending;
 }
 
 async function callAiApi<T>({
@@ -122,18 +160,30 @@ async function callAiApi<T>({
 	if (method !== 'GET') headers['content-type'] = 'application/json';
 	if (idempotencyKey) headers['idempotency-key'] = idempotencyKey;
 
-	const response = await fetch(`${sanitizeBaseUrl(ENV.AI_SERVER_BASE_URL)}${path}`, {
-		method,
-		headers,
-		body: method === 'GET' ? undefined : JSON.stringify(payload ?? {}),
-	});
+	let response: Response;
+	try {
+		response = await fetchWithResilience(
+			`${sanitizeBaseUrl(ENV.AI_SERVER_BASE_URL)}${path}`,
+			{
+				method,
+				headers,
+				body: method === 'GET' ? undefined : JSON.stringify(payload ?? {}),
+			},
+			aiHttpOpts()
+		);
+	} catch (err) {
+		if (err instanceof HttpClientError) {
+			throw new AiServiceError(err.message, err.status || 503, { errorCode: 'AI_HTTP_FAILURE' });
+		}
+		throw err;
+	}
 
 	const traceId = response.headers.get('x-trace-id') || undefined;
-	const body = (await response.json()) as Record<string, any>;
+	const body = await readJsonSafe(response);
 	if (!response.ok) {
-		throw new AiServiceError(body?.message || 'AI server request failed', response.status, {
-			errorCode: body?.error_code,
-			traceId: body?.trace_id || traceId,
+		throw new AiServiceError((body?.message as string) || 'AI server request failed', response.status, {
+			errorCode: body?.error_code as string | undefined,
+			traceId: (body?.trace_id as string | undefined) || traceId,
 			meta: body?.meta,
 		});
 	}
@@ -142,12 +192,8 @@ async function callAiApi<T>({
 
 export async function syncEmployeeData(input: EmployeeSyncInput & { requestId: string }) {
 	const payload = mapEmployeeInputToAiPayload(input);
-	const idempotencyKey = buildIdempotencyKey([
-		'employee',
-		input.tenantId,
-		input.employeeId,
-		input.requestId,
-	]);
+	const contentHash = buildContentHash(payload);
+	const idempotencyKey = buildIdempotencyKey(['employee', input.tenantId, input.employeeId, contentHash]);
 	return callAiApi({
 		tenantId: input.tenantId,
 		method: 'POST',
@@ -167,7 +213,8 @@ export async function syncTaskData(input: {
 	requestId: string;
 }) {
 	const payload = mapTaskInputToAiPayload(input);
-	const idempotencyKey = buildIdempotencyKey(['task', input.tenantId, input.taskId, input.requestId]);
+	const contentHash = buildContentHash(payload);
+	const idempotencyKey = buildIdempotencyKey(['task', input.tenantId, input.taskId, contentHash]);
 	return callAiApi({
 		tenantId: input.tenantId,
 		method: 'POST',
@@ -185,13 +232,9 @@ export async function generateAnalyticsReport(
 	}
 ) {
 	const payload = mapReportInputToAiPayload(input);
-	const idempotencyKey = buildIdempotencyKey([
-		'report',
-		input.tenantId,
-		input.employeeId,
-		input.history.length,
-		input.requestId,
-	]);
+	const dayKey = new Date().toISOString().slice(0, 10);
+	const contentHash = buildContentHash({ ...payload, day: dayKey });
+	const idempotencyKey = buildIdempotencyKey(['report', input.tenantId, input.employeeId, dayKey, contentHash]);
 	const result = await callAiApi<Record<string, unknown>>({
 		tenantId: input.tenantId,
 		method: 'POST',
@@ -243,14 +286,21 @@ export async function runPerformanceRanking(input: {
 	employees: PerformanceRankingEmployeePayload[];
 	requestId: string;
 }) {
+	const payload = {
+		tenant_id: input.tenantId,
+		employees: input.employees,
+	};
+	const idempotencyKey = buildIdempotencyKey([
+		'ranking',
+		input.tenantId,
+		buildContentHash(input.employees.map((e) => e.employee_id).sort()),
+	]);
 	return callAiApi<Record<string, unknown>>({
 		tenantId: input.tenantId,
 		method: 'POST',
 		path: '/api/v1/analytics/performance-ranking',
-		payload: {
-			tenant_id: input.tenantId,
-			employees: input.employees,
-		},
+		payload,
+		idempotencyKey,
 		requestId: input.requestId,
 	});
 }

@@ -6,10 +6,11 @@ export function success<T>(res: Response, data: T, message = 'Success', status =
 		data,
 	});
 }
-export function error(res: Response, message = 'Error', status = 500, errors?: any) {
+export function error(res: Response, message = 'Error', status = 500, errors?: any, code?: string) {
 	return res.status(status).json({
 		success: false,
 		message,
-		errors,
+		...(code ? { code } : {}),
+		...(errors !== undefined ? { errors } : {}),
 	});
 }

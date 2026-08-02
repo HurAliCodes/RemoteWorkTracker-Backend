@@ -1,5 +1,5 @@
 import express from 'express';
-import { authenticateJWT } from '../../middleware/auth.middleware';
+import { authenticateJWT, requirePortalToken } from '../../middleware/auth.middleware';
 import { validate } from '../../middleware/validate.middleware';
 import {
   createGoalController,
@@ -13,8 +13,9 @@ import { createGoalSchema, updateGoalProgressSchema, updateGoalSchema } from './
 
 const router = express.Router();
 
+router.use(authenticateJWT, requirePortalToken);
 router.post('/', validate(createGoalSchema), createGoalController);
-router.get('/', authenticateJWT, getAllGoalsController);
+router.get('/', getAllGoalsController);
 router.get('/:id', getGoalByIdController);
 router.patch('/:id', validate(updateGoalSchema), updateGoalController);
 router.delete('/:id', deleteGoalController);

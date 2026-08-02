@@ -24,12 +24,18 @@ import pool from '../../config/db';
 import bcrypt from 'bcryptjs';
 
 export const findUserByEmail = async (email: string) => {
-  const result = await pool.query('SELECT user_id, email, password_hash, name, role_id, department_id, organization_id FROM users WHERE email = $1', [email]);
+  const result = await pool.query(
+    'SELECT user_id, email, password_hash, name, role_id, department_id, organization_id FROM users WHERE email = $1 AND deleted_at IS NULL',
+    [email]
+  );
   return result.rows[0] || null;
 };
 
 export const findUserById = async (userId: string) => {
-  const result = await pool.query('SELECT user_id, name, email, role_id, department_id, organization_id, region, salary, created_at, updated_at, password_hash FROM users WHERE user_id = $1', [userId]);
+  const result = await pool.query(
+    'SELECT user_id, name, email, role_id, department_id, organization_id, region, salary, created_at, updated_at, password_hash FROM users WHERE user_id = $1 AND deleted_at IS NULL',
+    [userId]
+  );
   return result.rows[0] || null;
 };
 
@@ -60,7 +66,7 @@ export const findManagers = async (organizationId?: string) => {
     query += ` AND u.organization_id = $1`;
   }
 
-  query += ` ORDER BY u.name ASC`;
+  query += ` AND u.deleted_at IS NULL ORDER BY u.name ASC`;
   const result = await pool.query(query, values);
   return result.rows;
 };

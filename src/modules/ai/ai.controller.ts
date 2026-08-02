@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import crypto from 'crypto';
 import { AuthRequest } from '../../middleware/auth.middleware';
+import { resolveCallerOrganizationId } from '../../utils/resolve-org-from-auth';
 import { inspectDlqMessages, replayDlqMessages } from './ai.consumer';
 import { publishAiEvent } from '../../utils/rabbitmq';
 import { error, success } from '../../utils/response';
@@ -20,16 +21,21 @@ import {
 	taskSyncSchema,
 } from './ai.validation';
 
-function resolveTenantId(req: AuthRequest): string | null {
+/** Prefer JWT org claims; fall back to DB lookup via userId (employee tokens). */
+async function resolveTenantId(req: AuthRequest): Promise<string | null> {
 	const tenantFromToken =
 		(typeof req.user?.tenantId === 'string' && req.user.tenantId.trim()) ||
 		(typeof req.user?.organizationId === 'string' && req.user.organizationId.trim()) ||
 		(typeof req.user?.orgId === 'string' && req.user.orgId.trim()) ||
 		'';
-	return tenantFromToken || null;
+	if (tenantFromToken) return tenantFromToken;
+	return resolveCallerOrganizationId(req);
 }
 
 function getRequestId(req: Request): string {
+	const idempotency =
+		req.header('idempotency-key') || req.header('Idempotency-Key') || req.header('x-idempotency-key');
+	if (idempotency && idempotency.trim()) return idempotency.trim();
 	const headerId = req.header('x-request-id');
 	return headerId && headerId.trim() ? headerId.trim() : crypto.randomUUID();
 }
@@ -49,7 +55,7 @@ function handleAiError(res: Response, err: unknown) {
 
 export async function syncEmployeeDataController(req: AuthRequest, res: Response) {
 	try {
-		const tenantId = resolveTenantId(req);
+		const tenantId = await resolveTenantId(req);
 		if (!tenantId) return error(res, 'tenantId is required', 400);
 		const parsed = employeeSyncSchema.safeParse({ ...req.body, tenantId });
 		if (!parsed.success) return error(res, 'Validation failed', 400, parsed.error.flatten());
@@ -65,7 +71,7 @@ export async function syncEmployeeDataController(req: AuthRequest, res: Response
 
 export async function syncTaskDataController(req: AuthRequest, res: Response) {
 	try {
-		const tenantId = resolveTenantId(req);
+		const tenantId = await resolveTenantId(req);
 		if (!tenantId) return error(res, 'tenantId is required', 400);
 		const parsed = taskSyncSchema.safeParse({ ...req.body, tenantId });
 		if (!parsed.success) return error(res, 'Validation failed', 400, parsed.error.flatten());
@@ -81,7 +87,7 @@ export async function syncTaskDataController(req: AuthRequest, res: Response) {
 
 export async function generateAnalyticsReportController(req: AuthRequest, res: Response) {
 	try {
-		const tenantId = resolveTenantId(req);
+		const tenantId = await resolveTenantId(req);
 		if (!tenantId) return error(res, 'tenantId is required', 400);
 		const parsed = reportSyncSchema.safeParse({ ...req.body, tenantId });
 		if (!parsed.success) return error(res, 'Validation failed', 400, parsed.error.flatten());
@@ -97,7 +103,7 @@ export async function generateAnalyticsReportController(req: AuthRequest, res: R
 
 export async function enqueueAnalyticsReportController(req: AuthRequest, res: Response) {
 	try {
-		const tenantId = resolveTenantId(req);
+		const tenantId = await resolveTenantId(req);
 		if (!tenantId) return error(res, 'tenantId is required', 400);
 		const parsed = reportSyncSchema.safeParse({ ...req.body, tenantId });
 		if (!parsed.success) return error(res, 'Validation failed', 400, parsed.error.flatten());
@@ -117,7 +123,7 @@ export async function enqueueAnalyticsReportController(req: AuthRequest, res: Re
 
 export async function replayAnalyticsReportController(req: AuthRequest, res: Response) {
 	try {
-		const tenantId = resolveTenantId(req);
+		const tenantId = await resolveTenantId(req);
 		if (!tenantId) return error(res, 'tenantId is required', 400);
 		const parsed = replayReportSchema.safeParse(req.body);
 		if (!parsed.success) return error(res, 'Validation failed', 400, parsed.error.flatten());
@@ -142,7 +148,7 @@ export async function replayAnalyticsReportController(req: AuthRequest, res: Res
 
 export async function getWeeklyReportsController(req: AuthRequest, res: Response) {
 	try {
-		const tenantId = resolveTenantId(req);
+		const tenantId = await resolveTenantId(req);
 		if (!tenantId) return error(res, 'tenantId is required', 400);
 		const parsed = reportsQuerySchema.safeParse({
 			tenantId,
@@ -168,7 +174,7 @@ export async function getWeeklyReportsController(req: AuthRequest, res: Response
 
 export async function inspectDlqController(req: AuthRequest, res: Response) {
 	try {
-		const tenantId = resolveTenantId(req);
+		const tenantId = await resolveTenantId(req);
 		if (!tenantId) return error(res, 'tenantId is required', 400);
 		const parsed = dlqQuerySchema.safeParse({
 			limit: req.query.limit ? Number(req.query.limit) : undefined,
@@ -187,7 +193,7 @@ export async function inspectDlqController(req: AuthRequest, res: Response) {
 
 export async function replayDlqController(req: AuthRequest, res: Response) {
 	try {
-		const tenantId = resolveTenantId(req);
+		const tenantId = await resolveTenantId(req);
 		if (!tenantId) return error(res, 'tenantId is required', 400);
 		const parsed = dlqQuerySchema.safeParse({
 			limit: req.body?.limit !== undefined ? Number(req.body.limit) : undefined,

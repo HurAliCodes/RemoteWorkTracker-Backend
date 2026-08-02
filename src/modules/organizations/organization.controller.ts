@@ -28,11 +28,15 @@ import {
   validateOrganizationRefreshToken,
 } from './organization.validation';
 
-export const deleteUserByIdController = async (req: Request, res: Response) => {
+export const deleteUserByIdController = async (req: AuthRequest, res: Response) => {
   try {
+    const organizationId = await resolveCallerOrganizationId(req);
+    if (!organizationId) {
+      return res.status(401).json({ success: false, error: 'Unauthorized or missing organization' });
+    }
     const { id } = req.params;
     const userId = Array.isArray(id) ? id[0] : id;
-    const deletedUser = await deleteUserByIdService(userId);
+    const deletedUser = await deleteUserByIdService(userId!, organizationId, req.user?.userId);
     if (!deletedUser) {
       return res.status(404).json({ success: false, error: 'User not found' });
     }
@@ -79,13 +83,20 @@ export const updateUserByIdController = async (req: AuthRequest, res: Response) 
   }
 };
 
-export const registerUserController = async (req: Request, res: Response, next: NextFunction) => {
+export const registerUserController = async (req: AuthRequest, res: Response, next: NextFunction) => {
   const result = registerUserSchema.safeParse(req.body);
   if (!result.success) {
     return errorResponse(res, 'Validation failed', 400, result.error.issues);
   }
   try {
-    const registerResult = await registerUserService(result.data);
+    const organizationId = await resolveCallerOrganizationId(req);
+    if (!organizationId) {
+      return res.status(401).json({ success: false, error: 'Unauthorized or missing organization' });
+    }
+    if (req.user?.admin !== true) {
+      return res.status(403).json({ success: false, error: 'Admin access required to register users' });
+    }
+    const registerResult = await registerUserService(result.data, organizationId);
     logger.info('User registered', { userId: registerResult.userId, email: result.data.email });
     res.status(201).json(registerResult);
   } catch (error: any) {
@@ -187,13 +198,20 @@ export const createOrganizationController = async (req: Request, res: Response, 
   }
 };
 
-export const changeAdminPasswordController = async (req: Request, res: Response, next: NextFunction) => {
+export const changeAdminPasswordController = async (req: AuthRequest, res: Response, next: NextFunction) => {
   const result = validateChangeAdminPassword(req.body);
   if (!result.success) {
     return errorResponse(res, 'Validation failed', 400, result.error.issues);
   }
   try {
+    const callerOrgId = await resolveCallerOrganizationId(req);
+    if (!callerOrgId) {
+      return errorResponse(res, 'Unauthorized or missing organization', 401);
+    }
     const { organizationId, oldPassword, newPassword } = result.data;
+    if (organizationId !== callerOrgId) {
+      return errorResponse(res, 'Cannot change password for another organization', 403);
+    }
     const response = await changeAdminPasswordService(organizationId, oldPassword, newPassword);
     return success(res, response, 'Admin password changed successfully');
   } catch (err: any) {
@@ -202,11 +220,18 @@ export const changeAdminPasswordController = async (req: Request, res: Response,
   }
 };
 
-export const getOrganizationByIdController = async (req: Request, res: Response, next: NextFunction) => {
+export const getOrganizationByIdController = async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    const callerOrgId = await resolveCallerOrganizationId(req);
+    if (!callerOrgId) {
+      return errorResponse(res, 'Unauthorized or missing organization', 401);
+    }
     const { id } = req.params;
     const orgId = Array.isArray(id) ? id[0] : id;
-    const organization = await getOrganizationByIdService(orgId);
+    if (orgId !== callerOrgId) {
+      return errorResponse(res, 'Forbidden', 403);
+    }
+    const organization = await getOrganizationByIdService(orgId!);
     if (!organization) {
       return errorResponse(res, 'Organization not found', 404);
     }

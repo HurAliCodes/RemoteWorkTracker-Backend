@@ -3,9 +3,25 @@ import { validateDepartmentId, validateUpdateDepartment } from './department.val
 import { Request, Response, NextFunction } from 'express';
 import type { AuthRequest } from '../../middleware/auth.middleware';
 import { resolveCallerOrganizationId } from '../../utils/resolve-org-from-auth';
+import {
+  assertResourceInCallerOrg,
+  departmentBelongsToOrg,
+  requireCallerOrgId,
+} from '../../utils/org-access';
 import { createDepartmentService, getAllDepartmentsService, deleteDepartmentService, reassignUsersDepartmentService } from './department.service';
 import logger from '../../config/logger';
 import { success, error as errorResponse } from '../../utils/response';
+
+async function assertDepartmentAccess(req: Request, res: Response, departmentId: string) {
+  return assertResourceInCallerOrg(
+    req as AuthRequest,
+    res,
+    departmentId,
+    departmentBelongsToOrg,
+    'Department not found'
+  );
+}
+
 export const getDepartmentByIdController = async (req: Request, res: Response, next: NextFunction) => {
   try {
     let { id } = req.params;
@@ -14,6 +30,7 @@ export const getDepartmentByIdController = async (req: Request, res: Response, n
     if (!valid.success) {
       return errorResponse(res, 'Invalid department id', 400, valid.error.issues);
     }
+    if (!(await assertDepartmentAccess(req, res, id))) return;
     const result = await getDepartmentByIdService(id);
     return success(res, result, 'Department fetched successfully', 200);
   } catch (err: any) {
@@ -29,6 +46,7 @@ export const updateDepartmentController = async (req: Request, res: Response, ne
     if (!validId.success) {
       return errorResponse(res, 'Invalid department id', 400, validId.error.issues);
     }
+    if (!(await assertDepartmentAccess(req, res, id))) return;
     const validBody = validateUpdateDepartment(req.body);
     if (!validBody.success) {
       return errorResponse(res, 'Validation failed', 400, validBody.error.issues);
@@ -42,9 +60,17 @@ export const updateDepartmentController = async (req: Request, res: Response, ne
 };
 export const reassignUsersDepartmentController = async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const organizationId = await requireCallerOrgId(req as AuthRequest, res);
+    if (!organizationId) return;
     const { fromDepartmentId, toDepartmentId } = req.body;
     if (!fromDepartmentId || !toDepartmentId) {
       return errorResponse(res, 'fromDepartmentId and toDepartmentId are required', 400);
+    }
+    if (!(await departmentBelongsToOrg(fromDepartmentId, organizationId))) {
+      return errorResponse(res, 'Department not found', 404);
+    }
+    if (!(await departmentBelongsToOrg(toDepartmentId, organizationId))) {
+      return errorResponse(res, 'Department not found', 404);
     }
     const result = await reassignUsersDepartmentService(fromDepartmentId, toDepartmentId);
     return res.status(200).json(result);
@@ -53,15 +79,18 @@ export const reassignUsersDepartmentController = async (req: Request, res: Respo
     return errorResponse(res, err.message || 'Failed to reassign users', 400);
   }
 };
-export const createDepartmentController = async (req: Request, res: Response, next: NextFunction) => {
+export const createDepartmentController = async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    const organizationId = await requireCallerOrgId(req, res);
+    if (!organizationId) return;
+
     let results;
-    if (typeof req.body === 'object' && req.body.names && req.body.organizationId) {
-      const names = req.body.names.split(',').map((n: string) => n.trim()).filter(Boolean);
+    if (typeof req.body === 'object' && req.body.names) {
+      const names = String(req.body.names).split(',').map((n: string) => n.trim()).filter(Boolean);
       results = [];
       for (const name of names) {
         try {
-          const result = await createDepartmentService({ name, organizationId: req.body.organizationId });
+          const result = await createDepartmentService({ name, organizationId });
           results.push(result);
         } catch (err: any) {
           if (err.code === '23505' && err.detail && err.detail.includes('already exists')) {
@@ -75,7 +104,7 @@ export const createDepartmentController = async (req: Request, res: Response, ne
     } else if (Array.isArray(req.body)) {
       results = [];
       for (const dept of req.body) {
-        const { name, organizationId } = dept;
+        const { name } = dept;
         try {
           const result = await createDepartmentService({ name, organizationId });
           results.push(result);
@@ -89,7 +118,7 @@ export const createDepartmentController = async (req: Request, res: Response, ne
       }
       return success(res, results, 'Departments created successfully', 201);
     } else {
-      const { name, organizationId } = req.body;
+      const { name } = req.body;
       try {
         const result = await createDepartmentService({ name, organizationId });
         return success(res, result, 'Department created successfully', 201);
@@ -128,6 +157,7 @@ export const deleteDepartmentController = async (req: Request, res: Response, ne
   try {
     let { id } = req.params;
     if (Array.isArray(id)) id = id[0];
+    if (!(await assertDepartmentAccess(req, res, id))) return;
     const result = await deleteDepartmentService(id);
     return res.status(200).json(result);
   } catch (err: any) {

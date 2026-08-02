@@ -6,18 +6,18 @@ export const registerUserSchema = z.object({
   password: z.string().min(8).regex(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*]).+$/),
   roleId: z.string().uuid(),
   departmentId: z.string().uuid(),
-  organizationId: z.string().uuid(),
+  organizationId: z.string().uuid().optional(),
   region: z.string().length(2),
   salary: z.number().min(0)
-});
+}).strict();
 export const orgForgotPasswordSchema = z.object({
   email: z.string().email()
-});
+}).strict();
 
 export const orgResetPasswordSchema = z.object({
   resetCode: z.string().length(6).regex(/^\d{6}$/),
   newPassword: z.string().min(8).regex(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*]).+$/)
-});
+}).strict();
 
 export function validateOrgForgotPassword(data: unknown) {
   return orgForgotPasswordSchema.safeParse(data);
@@ -28,7 +28,7 @@ export function validateOrgResetPassword(data: unknown) {
 }
 export const organizationRefreshTokenSchema = z.object({
   refreshToken: z.string().min(10)
-});
+}).strict();
 
 export function validateOrganizationRefreshToken(data: unknown) {
   return organizationRefreshTokenSchema.safeParse(data);
@@ -36,7 +36,7 @@ export function validateOrganizationRefreshToken(data: unknown) {
 export const organizationLoginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(6)
-});
+}).strict();
 
 export function validateOrganizationLogin(data: unknown) {
   return organizationLoginSchema.safeParse(data);
@@ -48,7 +48,7 @@ export const createOrganizationSchema = z.object({
   organization_type: z.string().optional(),
   adminEmail: z.string().email(),
   adminPassword: z.string().min(6)
-});
+}).strict();
 
 export function validateCreateOrganization(data: unknown) {
   return createOrganizationSchema.safeParse(data);
@@ -58,7 +58,7 @@ export const changeAdminPasswordSchema = z.object({
   organizationId: z.string().uuid(),
   oldPassword: z.string().min(8),
   newPassword: z.string().min(8).regex(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*]).+$/)
-});
+}).strict();
 
 export function validateChangeAdminPassword(data: unknown) {
   return changeAdminPasswordSchema.safeParse(data);

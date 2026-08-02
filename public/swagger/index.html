@@ -3,10 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>API Docs (Swagger UI)</title>
+    <title>Remote Work Tracker API — Swagger UI</title>
     <link
       rel="stylesheet"
-      href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"
+      href="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui.css"
     />
     <style>
       html,
@@ -15,29 +15,46 @@
         margin: 0;
         background: #fafafa;
       }
-      .swagger-ui .topbar {
-        display: none;
-      }
       #swagger-ui {
         min-height: 100%;
+      }
+      /* Small banner so users know to click Authorize before Try it out. */
+      .rwt-hint {
+        font-family: system-ui, sans-serif;
+        font-size: 13px;
+        line-height: 1.4;
+        background: #eef2ff;
+        border-bottom: 1px solid #c7d2fe;
+        color: #3730a3;
+        padding: 10px 16px;
+      }
+      .rwt-hint code {
+        background: #e0e7ff;
+        padding: 1px 5px;
+        border-radius: 4px;
+      }
+      #swagger-ui-loading {
+        font-family: system-ui, sans-serif;
+        color: #6b7280;
+        padding: 24px;
       }
     </style>
   </head>
   <body>
-    <div id="swagger-ui"></div>
+    <div class="rwt-hint">
+      Click <strong>Authorize</strong> and paste your portal JWT to enable
+      <strong>Try it out</strong> on secured endpoints. Pick the correct
+      <code>server</code> (localhost vs production) from the dropdown below.
+    </div>
+    <div id="swagger-ui"><div id="swagger-ui-loading">Loading API docs…</div></div>
     <script
-      src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"
-      charset="UTF-8"
-    ></script>
-    <script
-      src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-standalone-preset.js"
+      src="https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-bundle.js"
       charset="UTF-8"
     ></script>
     <script>
       window.onload = () => {
-        // Resolve openapi.json relative to the current URL so the page
-        // works whether it's mounted at /docs/, /swagger/, or anywhere
-        // else.
+        // Resolve openapi.json relative to the current URL so the page works
+        // whether it's mounted at /docs/, /swagger/, or anywhere else.
         const specUrl = new URL("./openapi.json", window.location.href).toString();
 
         window.ui = SwaggerUIBundle({
@@ -49,12 +66,15 @@
           tryItOutEnabled: true,
           filter: true,
           docExpansion: "list",
-          presets: [
-            SwaggerUIBundle.presets.apis,
-            SwaggerUIStandalonePreset,
-          ],
+          defaultModelsExpandDepth: 1,
+          defaultModelExpandDepth: 3,
+          // Skip the external online validator (avoids the red "unable to
+          // validate" badge when the host is offline / behind auth).
+          validatorUrl: null,
+          requestSnippetsEnabled: true,
+          presets: [SwaggerUIBundle.presets.apis],
           plugins: [SwaggerUIBundle.plugins.DownloadUrl],
-          layout: "StandaloneLayout",
+          layout: "BaseLayout",
         });
       };
     </script>

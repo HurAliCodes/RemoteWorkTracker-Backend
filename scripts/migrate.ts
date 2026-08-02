@@ -27,6 +27,7 @@ import resetPasswordResetsTable from './migrate-password_reset';
 import migrateDevices from './migrate-devices';
 import migrateDevicePairingCodes from './migrate-device_pairing_codes';
 import migrateIdleLogs from './migrate-idle_logs';
+import migrateSchemaUpgrades from './migrate-schema-upgrades';
 
 async function runMigrations() {
 	await migrateOrganizations();
@@ -58,6 +59,7 @@ async function runMigrations() {
 	await migrateActivityLogs();
 	await migrateIdleLogs();
 	await migrateAnalytics();
+	await migrateSchemaUpgrades();
 	console.log('All migrations completed successfully.');
 }
 runMigrations();

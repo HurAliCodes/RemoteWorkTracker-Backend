@@ -1,6 +1,6 @@
 # Web Page and API Mapping Document
 
-Last updated: 2026-03-23
+Last updated: 2026-07-27
 Backend source: mounted routes in src/app.ts and module controllers/services/validations.
 
 ## 1) Platform Scope
@@ -20,16 +20,22 @@ Mounted modules currently available:
 - /roles
 - /departments
 - /projects
+- /tasks
 - /goals
 - /courses
 - /wellness
 - /notifications
+- /payroll
+- /attendance (telemetry + check-in/out + geo-fences)
+- /analytics
+- /dashboard
+- /telemetry
+- /agent
+- /ai
+- /compliance
+- /performance
 
-Not exposed yet (do not design production pages depending on these yet):
-- analytics
-- attendance
-- activity
-
+Web pages: `/compliance`, `/performance`, `/attendance`, `/analytics`, `/wellness`, `/settings` (change admin password), plus existing CRUD pages. AuthGuard protects `(main)` routes.
 ## 2) Global UI and Technical Rules
 
 ### Layout behavior by device

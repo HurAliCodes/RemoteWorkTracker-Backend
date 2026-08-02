@@ -358,13 +358,24 @@ export function baselineHistoryFromAiWeeklyPayload(data: unknown): AiBaselineHis
 	for (const item of hist) {
 		if (!item || typeof item !== 'object') continue;
 		const row = item as Record<string, unknown>;
-		const createdRaw = row.created_at;
+		const nested =
+			row.report && typeof row.report === 'object' ? (row.report as Record<string, unknown>) : null;
+		const createdRaw = row.created_at ?? nested?.created_at;
 		const date =
 			typeof createdRaw === 'string' && createdRaw.length >= 10
 				? createdRaw.slice(0, 10)
 				: utcTodayYMD();
-		const prod = Number(row.productivity_score ?? 0);
-		out.push({ date, productivityScore: prod, workingHours: 8, idleHours: 1 });
+		const prod = Number(row.productivity_score ?? nested?.productivity_score ?? 0);
+		const workingHours = Number(
+			row.working_hours ?? nested?.working_hours ?? nested?.input_working_hours ?? 0
+		);
+		const idleHours = Number(row.idle_hours ?? nested?.idle_hours ?? nested?.input_idle_hours ?? 0);
+		out.push({
+			date,
+			productivityScore: Number.isFinite(prod) ? prod : 0,
+			workingHours: Number.isFinite(workingHours) ? workingHours : 0,
+			idleHours: Number.isFinite(idleHours) ? idleHours : 0,
+		});
 	}
 	return out;
 }

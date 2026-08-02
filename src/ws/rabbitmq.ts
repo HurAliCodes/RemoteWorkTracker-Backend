@@ -1,6 +1,7 @@
 import amqp from 'amqplib';
 import { Server } from 'socket.io';
-const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost';
+import { ENV } from '../config/env';
+const RABBITMQ_URL = ENV.RABBITMQ_URL || 'amqp://localhost';
 export async function setupRabbitMQ(io: Server) {
   try {
     const connection = await amqp.connect(RABBITMQ_URL);

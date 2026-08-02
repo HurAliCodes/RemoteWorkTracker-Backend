@@ -68,23 +68,35 @@ export async function createCourseService(input: CreateCourseInput) {
   return mapCourseRow(created);
 }
 
-export async function listCoursesService(opts: { page?: number; limit?: number }) {
+export async function listCoursesService(opts: {
+  page?: number;
+  limit?: number;
+  organizationId: string;
+}) {
   const page = opts.page ?? 1;
   const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
   const offset = (page - 1) * limit;
 
-  const countResult = await pool.query('SELECT COUNT(*)::int AS count FROM courses');
+  const countResult = await pool.query(
+    `SELECT COUNT(*)::int AS count
+     FROM courses c
+     INNER JOIN users u ON u.user_id = c.instructor_id
+     WHERE u.organization_id = $1`,
+    [opts.organizationId]
+  );
   const totalRecords = Number(countResult.rows[0]?.count ?? 0);
   const totalPages = Math.ceil(totalRecords / limit) || 1;
 
   const listResult = await pool.query(
     `
-      SELECT course_id, title, description, instructor_id, created_at, updated_at
-      FROM courses
-      ORDER BY created_at DESC
-      LIMIT $1 OFFSET $2
+      SELECT c.course_id, c.title, c.description, c.instructor_id, c.created_at, c.updated_at
+      FROM courses c
+      INNER JOIN users u ON u.user_id = c.instructor_id
+      WHERE u.organization_id = $1
+      ORDER BY c.created_at DESC
+      LIMIT $2 OFFSET $3
     `,
-    [limit, offset]
+    [opts.organizationId, limit, offset]
   );
 
   return {
@@ -135,8 +147,11 @@ export async function deleteCourseService(courseId: string) {
   const existing = await db.findOne('courses', { course_id: courseId });
   if (!existing) throw new Error('Course not found.');
 
-  await pool.query('DELETE FROM course_enrollments WHERE course_id = $1', [courseId]);
-  await pool.query('DELETE FROM courses WHERE course_id = $1', [courseId]);
+  const { withTransaction } = await import('../../utils/withTransaction');
+  await withTransaction(async (client) => {
+    await client.query('DELETE FROM course_enrollments WHERE course_id = $1', [courseId]);
+    await client.query('DELETE FROM courses WHERE course_id = $1', [courseId]);
+  });
 
   logger.info('Course deleted', { course_id: courseId });
   return { message: 'Course deleted successfully' };
@@ -146,31 +161,32 @@ export async function enrollUserInCourseService(courseId: string, input: EnrollC
   const course = await db.findOne('courses', { course_id: courseId });
   if (!course) throw new Error('Course not found.');
 
-  const user = await db.findOne('users', { user_id: input.userId });
-  if (!user) throw new Error('User not found.');
-
-  const existingEnrollment = await pool.query(
-    'SELECT enrollment_id FROM course_enrollments WHERE course_id = $1 AND user_id = $2 LIMIT 1',
-    [courseId, input.userId]
+  const user = await pool.query(
+    `SELECT user_id FROM users WHERE user_id = $1 AND deleted_at IS NULL LIMIT 1`,
+    [input.userId]
   );
-
-  if (existingEnrollment.rowCount) {
-    throw new Error('User is already enrolled in this course.');
-  }
+  if (!user.rows[0]) throw new Error('User not found.');
 
   const enrollmentId = crypto.randomUUID();
   const now = new Date().toISOString();
 
-  await db.insert('course_enrollments', {
-    enrollment_id: enrollmentId,
-    course_id: courseId,
-    user_id: input.userId,
-    status: 'ENROLLED',
-    progress: 0,
-    completed_at: null,
-    created_at: now,
-    updated_at: now,
-  });
+  try {
+    await db.insert('course_enrollments', {
+      enrollment_id: enrollmentId,
+      course_id: courseId,
+      user_id: input.userId,
+      status: 'ENROLLED',
+      progress: 0,
+      completed_at: null,
+      created_at: now,
+      updated_at: now,
+    });
+  } catch (err: any) {
+    if (err?.code === '23505') {
+      throw new Error('User is already enrolled in this course.');
+    }
+    throw err;
+  }
 
   const created = await pool.query(
     `
@@ -194,13 +210,14 @@ export async function listEnrollmentsService(opts: {
   userId?: string;
   courseId?: string;
   status?: 'ENROLLED' | 'COMPLETED' | 'DROPPED';
+  organizationId: string;
 }) {
   const page = opts.page ?? 1;
   const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
   const offset = (page - 1) * limit;
 
-  const whereParts: string[] = [];
-  const params: any[] = [];
+  const whereParts: string[] = [`u.organization_id = $1`];
+  const params: any[] = [opts.organizationId];
 
   if (opts.userId) {
     params.push(opts.userId);
@@ -217,9 +234,13 @@ export async function listEnrollmentsService(opts: {
     whereParts.push(`ce.status = $${params.length}`);
   }
 
-  const whereClause = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '';
+  const whereClause = `WHERE ${whereParts.join(' AND ')}`;
 
-  const countQuery = `SELECT COUNT(*)::int AS count FROM course_enrollments ce ${whereClause}`;
+  const countQuery = `
+    SELECT COUNT(*)::int AS count
+    FROM course_enrollments ce
+    INNER JOIN users u ON u.user_id = ce.user_id
+    ${whereClause}`;
   const countResult = await pool.query(countQuery, params);
   const totalRecords = Number(countResult.rows[0]?.count ?? 0);
   const totalPages = Math.ceil(totalRecords / limit) || 1;
@@ -229,6 +250,7 @@ export async function listEnrollmentsService(opts: {
     SELECT ce.enrollment_id, ce.course_id, ce.user_id, ce.status, ce.progress, ce.completed_at, ce.created_at, ce.updated_at,
            c.title AS course_title
     FROM course_enrollments ce
+    INNER JOIN users u ON u.user_id = ce.user_id
     LEFT JOIN courses c ON c.course_id = ce.course_id
     ${whereClause}
     ORDER BY ce.created_at DESC

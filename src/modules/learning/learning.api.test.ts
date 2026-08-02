@@ -5,6 +5,35 @@ import * as learningService from './learning.service';
 
 jest.mock('uuid', () => ({ v4: () => 'mock-course-uuid' }));
 jest.mock('./learning.service');
+jest.mock('../../middleware/auth.middleware', () => ({
+	authenticateJWT: (req: any, _res: unknown, next: () => void) => {
+		req.user = { organizationId: 'org-test-id', admin: true };
+		next();
+	},
+  requirePortalToken: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireDeviceToken: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireEmployeeToken: (_req: unknown, _res: unknown, next: () => void) => next(),
+}));
+
+jest.mock('../../utils/org-access', () => ({
+  requireCallerOrgId: async (_req: unknown, _res: unknown) => 'org-test-id',
+  assertResourceInCallerOrg: async () => 'org-test-id',
+  projectBelongsToOrg: async () => true,
+  taskBelongsToOrg: async () => true,
+  goalBelongsToOrg: async () => true,
+  departmentBelongsToOrg: async () => true,
+  payrollBelongsToOrg: async () => true,
+  attendanceBelongsToOrg: async () => true,
+  userBelongsToOrg: async () => true,
+  courseInstructorInOrg: async () => true,
+}));
+
+jest.mock('../../middleware/requireAdmin.middleware', () => ({
+  requireOrgAdmin: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireManagerOrAdmin: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireAdmin: (_req: unknown, _res: unknown, next: () => void) => next(),
+  isManagerOrAdmin: async () => true,
+}));
 
 const app = express();
 app.use(express.json());
@@ -12,9 +41,9 @@ app.use('/api/v1/courses', learningRouter);
 
 const mockedService = learningService as jest.Mocked<typeof learningService>;
 
-const courseId = '33333333-3333-3333-3333-333333333333';
-const instructorId = '11111111-1111-1111-1111-111111111111';
-const userId = '22222222-2222-2222-2222-222222222222';
+const courseId = '33333333-3333-4333-8333-333333333333';
+const instructorId = '11111111-1111-4111-8111-111111111111';
+const userId = '22222222-2222-4222-8222-222222222222';
 
 describe('Learning APIs', () => {
 	beforeEach(() => {
@@ -74,6 +103,7 @@ describe('Learning APIs', () => {
 			expect(mockedService.listCoursesService).toHaveBeenCalledWith({
 				page: undefined,
 				limit: undefined,
+				organizationId: 'org-test-id',
 			});
 		});
 	});
@@ -175,6 +205,7 @@ describe('Learning APIs', () => {
 				userId: undefined,
 				courseId: undefined,
 				status: undefined,
+				organizationId: 'org-test-id',
 			});
 		});
 	});

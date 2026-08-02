@@ -1,6 +1,14 @@
 import { NextFunction, Request, Response } from 'express';
 import logger from '../../config/logger';
 import { error as errorResponse, success } from '../../utils/response';
+import type { AuthRequest } from '../../middleware/auth.middleware';
+import { isManagerOrAdmin } from '../../middleware/requireAdmin.middleware';
+import {
+	assertResourceInCallerOrg,
+	courseInstructorInOrg,
+	requireCallerOrgId,
+	userBelongsToOrg,
+} from '../../utils/org-access';
 import {
 	createCourseService,
 	deleteCourseService,
@@ -12,9 +20,24 @@ import {
 } from './learning.service';
 import { listCoursesQuerySchema, listEnrollmentsQuerySchema } from './learning.validation';
 
-export const createCourseController = async (req: Request, res: Response, next: NextFunction) => {
+async function assertCourseAccess(req: Request, res: Response, courseId: string) {
+	return assertResourceInCallerOrg(
+		req as AuthRequest,
+		res,
+		courseId,
+		courseInstructorInOrg,
+		'Course not found'
+	);
+}
+
+export const createCourseController = async (req: AuthRequest, res: Response, next: NextFunction) => {
 	try {
+		const organizationId = await requireCallerOrgId(req, res);
+		if (!organizationId) return;
 		const body = req.body;
+		if (!(await userBelongsToOrg(body.instructorId, organizationId))) {
+			return errorResponse(res, 'Instructor not found', 404);
+		}
 		const result = await createCourseService({
 			title: body.title,
 			description: body.description,
@@ -29,8 +52,11 @@ export const createCourseController = async (req: Request, res: Response, next: 
 	}
 };
 
-export const listCoursesController = async (req: Request, res: Response, next: NextFunction) => {
+export const listCoursesController = async (req: AuthRequest, res: Response, next: NextFunction) => {
 	try {
+		const organizationId = await requireCallerOrgId(req, res);
+		if (!organizationId) return;
+
 		const parsed = listCoursesQuerySchema.safeParse(req.query);
 		if (!parsed.success) {
 			return errorResponse(res, 'Invalid query parameters', 400, parsed.error.issues);
@@ -39,6 +65,7 @@ export const listCoursesController = async (req: Request, res: Response, next: N
 		const result = await listCoursesService({
 			page: parsed.data.page,
 			limit: parsed.data.limit,
+			organizationId,
 		});
 
 		return success(res, result, 'Courses fetched successfully');
@@ -51,6 +78,7 @@ export const listCoursesController = async (req: Request, res: Response, next: N
 export const getCourseByIdController = async (req: Request, res: Response, next: NextFunction) => {
 	try {
 		const courseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+		if (!(await assertCourseAccess(req, res, courseId))) return;
 		const result = await getCourseByIdService(courseId);
 		if (!result) return errorResponse(res, 'Course not found', 404);
 
@@ -61,10 +89,15 @@ export const getCourseByIdController = async (req: Request, res: Response, next:
 	}
 };
 
-export const updateCourseController = async (req: Request, res: Response, next: NextFunction) => {
+export const updateCourseController = async (req: AuthRequest, res: Response, next: NextFunction) => {
 	try {
 		const courseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+		const organizationId = await assertCourseAccess(req, res, courseId);
+		if (!organizationId) return;
 		const body = req.body;
+		if (body.instructorId && !(await userBelongsToOrg(body.instructorId, organizationId))) {
+			return errorResponse(res, 'Instructor not found', 404);
+		}
 
 		const result = await updateCourseService(courseId, {
 			title: body.title,
@@ -84,6 +117,7 @@ export const updateCourseController = async (req: Request, res: Response, next: 
 export const deleteCourseController = async (req: Request, res: Response, next: NextFunction) => {
 	try {
 		const courseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+		if (!(await assertCourseAccess(req, res, courseId))) return;
 		const result = await deleteCourseService(courseId);
 		return success(res, result, 'Course deleted successfully');
 	} catch (err: any) {
@@ -93,9 +127,14 @@ export const deleteCourseController = async (req: Request, res: Response, next: 
 	}
 };
 
-export const enrollCourseController = async (req: Request, res: Response, next: NextFunction) => {
+export const enrollCourseController = async (req: AuthRequest, res: Response, next: NextFunction) => {
 	try {
 		const courseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+		const organizationId = await assertCourseAccess(req, res, courseId);
+		if (!organizationId) return;
+		if (!(await userBelongsToOrg(req.body.userId, organizationId))) {
+			return errorResponse(res, 'User not found', 404);
+		}
 		const result = await enrollUserInCourseService(courseId, {
 			userId: req.body.userId,
 		});
@@ -112,19 +151,31 @@ export const enrollCourseController = async (req: Request, res: Response, next: 
 	}
 };
 
-export const listEnrollmentsController = async (req: Request, res: Response, next: NextFunction) => {
+export const listEnrollmentsController = async (req: AuthRequest, res: Response, next: NextFunction) => {
 	try {
+		const organizationId = await requireCallerOrgId(req, res);
+		if (!organizationId) return;
+
 		const parsed = listEnrollmentsQuerySchema.safeParse(req.query);
 		if (!parsed.success) {
 			return errorResponse(res, 'Invalid query parameters', 400, parsed.error.issues);
 		}
 
+		const privileged = await isManagerOrAdmin(req);
+		let userId = parsed.data.userId;
+		if (!privileged) {
+			const callerId = req.user?.userId;
+			if (!callerId) return errorResponse(res, 'Unauthorized', 401);
+			userId = callerId;
+		}
+
 		const result = await listEnrollmentsService({
 			page: parsed.data.page,
 			limit: parsed.data.limit,
-			userId: parsed.data.userId,
+			userId,
 			courseId: parsed.data.courseId,
 			status: parsed.data.status,
+			organizationId,
 		});
 
 		return success(res, result, 'Enrollments fetched successfully');

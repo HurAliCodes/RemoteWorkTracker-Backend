@@ -1,21 +1,19 @@
 import { createUserRefreshToken, findUserRefreshToken, deleteUserRefreshToken, findUserByEmail, findUserById, findManagers, updateUserPassword, updateUserProfile } from './user.repo';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-import { ENV } from '../../config/env';
-const JWT_SECRET = ENV.JWT_SECRET;
-const JWT_REFRESH_SECRET = ENV.JWT_REFRESH_SECRET;
+import { signAccessToken, signRefreshToken, verifyRefreshToken } from '../../utils/jwt';
 
 export const generateTokens = (user: any) => {
-  const accessToken = jwt.sign(
-    { userId: user.user_id, email: user.email, roleId: user.role_id },
-    JWT_SECRET,
-    { expiresIn: '15m' }
+  const accessToken = signAccessToken(
+    {
+      userId: user.user_id,
+      email: user.email,
+      roleId: user.role_id,
+      organizationId: user.organization_id,
+    },
+    '15m',
+    'user'
   );
-  const refreshToken = jwt.sign(
-    { userId: user.user_id },
-    JWT_REFRESH_SECRET,
-    { expiresIn: '7d' }
-  );
+  const refreshToken = signRefreshToken({ userId: user.user_id }, '7d', 'user');
   return { accessToken, refreshToken };
 };
 
@@ -28,7 +26,7 @@ export const saveUserRefreshTokenService = async (userId: string, refreshToken: 
 export const refreshUserTokenService = async (refreshToken: string) => {
   let payload: any;
   try {
-    payload = jwt.verify(refreshToken, JWT_REFRESH_SECRET) as any;
+    payload = verifyRefreshToken(refreshToken) as any;
   } catch (err) {
     throw new Error('Invalid or expired refresh token');
   }

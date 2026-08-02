@@ -32,7 +32,7 @@ Response `200` (flat JSON):
 
 **POST** `/register`
 
-Unauthenticated. Links a workstation to the user who generated the pairing code (or accepts an explicit `userId` for trusted setups).
+Unauthenticated. Links a workstation to the user who generated the pairing code. **`pairingCode` is required** — direct `userId` registration is not supported.
 
 Body:
 
@@ -45,8 +45,6 @@ Body:
 }
 ```
 
-Either `userId` (UUID) **or** `pairingCode` is required.
-
 Response `200`:
 
 ```json
@@ -58,11 +56,36 @@ Response `200`:
 }
 ```
 
-The device should store tokens and send `Authorization: Bearer <accessToken>` on subsequent telemetry calls.
+The device should store tokens (shared file next to `agent_config.json`, plus Windows Credential Manager when available) and send `Authorization: Bearer <accessToken>` on subsequent telemetry calls.
+
+## Refresh device token
+
+**POST** `/refresh-token`
+
+Unauthenticated. Rotates device access/refresh tokens.
+
+Body:
+
+```json
+{
+  "refreshToken": "..."
+}
+```
+
+Response `200`:
+
+```json
+{
+  "accessToken": "...",
+  "refreshToken": "..."
+}
+```
 
 ## Heartbeat
 
 **POST** `/heartbeat`
+
+Headers: `Authorization: Bearer <device access token>`
 
 ```json
 {
@@ -74,6 +97,8 @@ The device should store tokens and send `Authorization: Bearer <accessToken>` on
 ## Activity logs
 
 **POST** `/activity`
+
+Headers: `Authorization: Bearer <device access token>`
 
 Body:
 
@@ -102,6 +127,8 @@ The server maps agent-style payloads into `activity_logs` (`action` is truncated
 
 **POST** `/idle`
 
+Headers: `Authorization: Bearer <device access token>`
+
 ```json
 {
   "deviceId": "uuid",
@@ -111,7 +138,7 @@ The server maps agent-style payloads into `activity_logs` (`action` is truncated
 
 Either `idleDuration` or `idleTime` (seconds) is required. `userId` is optional; if omitted, the server resolves it from the `devices` row for `deviceId`.
 
-Optional: `timestamp` (ISO string).
+Optional: `timestamp` (ISO string). The Windows agent only posts idle samples when idle duration is ≥ 60 seconds.
 
 ## Database
 

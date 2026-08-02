@@ -1,5 +1,7 @@
 import express from 'express';
 import { validate } from '../../middleware/validate.middleware';
+import { authenticateJWT, requirePortalToken } from '../../middleware/auth.middleware';
+import { requireOrgAdmin } from '../../middleware/requireAdmin.middleware';
 import {
 	createCourseController,
 	deleteCourseController,
@@ -13,12 +15,13 @@ import { createCourseSchema, enrollCourseSchema, updateCourseSchema } from './le
 
 const router = express.Router();
 
-router.post('/', validate(createCourseSchema), createCourseController);
+router.use(authenticateJWT, requirePortalToken);
+router.post('/', requireOrgAdmin, validate(createCourseSchema), createCourseController);
 router.get('/', listCoursesController);
 router.get('/enrollments', listEnrollmentsController);
 router.get('/:id', getCourseByIdController);
-router.patch('/:id', validate(updateCourseSchema), updateCourseController);
-router.delete('/:id', deleteCourseController);
+router.patch('/:id', requireOrgAdmin, validate(updateCourseSchema), updateCourseController);
+router.delete('/:id', requireOrgAdmin, deleteCourseController);
 router.post('/:id/enroll', validate(enrollCourseSchema), enrollCourseController);
 
 export default router;

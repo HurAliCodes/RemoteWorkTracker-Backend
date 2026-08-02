@@ -16,6 +16,9 @@ export default async function migrateDevices() {
     `);
     await client.query('CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id)');
     await client.query('CREATE INDEX IF NOT EXISTS idx_devices_hostname ON devices(hostname)');
+    await client.query(
+      `ALTER TABLE devices ADD COLUMN IF NOT EXISTS refresh_token_hash TEXT`
+    );
     console.log('Devices table migrated successfully.');
   });
 }

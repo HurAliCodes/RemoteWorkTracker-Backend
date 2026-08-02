@@ -8,7 +8,24 @@ jest.mock('../../middleware/auth.middleware', () => ({
 		}
 		next();
 	},
+  requirePortalToken: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireDeviceToken: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireEmployeeToken: (_req: unknown, _res: unknown, next: () => void) => next(),
 }));
+
+jest.mock('../../utils/org-access', () => ({
+  requireCallerOrgId: async (_req: unknown, _res: unknown) => 'org-test',
+  assertResourceInCallerOrg: async () => 'org-test',
+  projectBelongsToOrg: async () => true,
+  taskBelongsToOrg: async () => true,
+  goalBelongsToOrg: async () => true,
+  departmentBelongsToOrg: async () => true,
+  payrollBelongsToOrg: async () => true,
+  attendanceBelongsToOrg: async () => true,
+  userBelongsToOrg: async () => true,
+  courseInstructorInOrg: async () => true,
+}));
+
 
 jest.mock('./ai.service');
 
@@ -28,7 +45,7 @@ describe('POST /api/v1/ai', () => {
 		jest.clearAllMocks();
 	});
 
-	it('returns 400 tenantId is required when user has no org claim', async () => {
+	it('returns 400 tenantId is required when tenant cannot be resolved', async () => {
 		aiApiAuthState.attachOrgId = false;
 
 		const res = await request(app)

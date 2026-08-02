@@ -1,21 +1,18 @@
 import { z } from 'zod';
 
-export const registerDeviceSchema = z
-  .object({
-    deviceId: z.string().min(1, 'deviceId is required'),
-    userId: z.string().uuid('userId must be a valid UUID').optional(),
-    pairingCode: z
-      .string()
-      .min(6, 'pairingCode must be at least 6 characters')
-      .max(12, 'pairingCode is too long')
-      .optional(),
-    hostname: z.string().min(1, 'hostname is required'),
-    os: z.string().min(1, 'os is required'),
-  })
-  .refine((data) => Boolean(data.userId) || Boolean(data.pairingCode), {
-    message: 'Either userId or pairingCode is required',
-    path: ['userId'],
-  });
+export const registerDeviceSchema = z.object({
+  deviceId: z.string().min(1, 'deviceId is required'),
+  pairingCode: z
+    .string()
+    .min(6, 'pairingCode must be at least 6 characters')
+    .max(12, 'pairingCode is too long'),
+  hostname: z.string().min(1, 'hostname is required'),
+  os: z.string().min(1, 'os is required'),
+}).strict();
+
+export const refreshDeviceTokenSchema = z.object({
+  refreshToken: z.string().min(10),
+}).strict();
 
 export const heartbeatSchema = z.object({
   deviceId: z.string().min(1, 'deviceId is required'),

@@ -1,0 +1,77 @@
+# Optional local stack for RabbitMQ / Redis / AI server.
+# Neon (or any external Postgres) remains the supported DB — do NOT force a local
+# Postgres container over DATABASE_URL when using Neon.
+#
+# Typical Neon workflow:
+#   1. Start deps: docker compose -f docker-compose.ai.yml up -d rabbitmq redis ai-server
+#   2. Run backend against Neon with DATABASE_URL + DB_SSL=true in backend/.env
+#   3. Optionally: npm run worker:ai in backend/
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-user}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-password}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  ai-server:
+    build:
+      context: ../ai-server
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: sqlite:////app/data/employee_analytics.db
+      AI_SERVICE_CLIENT_ID: ${AI_SERVICE_CLIENT_ID:-portal-backend}
+      AI_SERVICE_CLIENT_SECRET: ${AI_SERVICE_CLIENT_SECRET:-change-me}
+      JWT_SECRET: ${AI_JWT_SECRET:-dev-ai-jwt-secret-change-me}
+      ML_ENABLED: ${ML_ENABLED:-false}
+    volumes:
+      - ai_server_data:/app/data
+      - ai_model_registry:/app/ml/registry
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # Optional AI worker (portal backend consumer). Uses host networking-style env for Neon.
+  ai-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["worker"]
+    env_file:
+      - .env
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-user}:${RABBITMQ_PASSWORD:-password}@rabbitmq:5672
+      AI_SERVER_BASE_URL: http://ai-server:8000
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      ai-server:
+        condition: service_healthy
+    command: sh -c "npx ts-node src/ai.worker.ts"
+
+volumes:
+  ai_server_data:
+  ai_model_registry:

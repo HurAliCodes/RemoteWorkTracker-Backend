@@ -1,4 +1,5 @@
 import pool from '../../config/db';
+import crypto from 'crypto';
 
 export async function saveDevice(device: any) {
   const result = await pool.query(
@@ -104,5 +105,34 @@ export async function deleteExpiredPairingCodeRecords() {
     `DELETE FROM device_pairing_codes
      WHERE expires_at <= NOW()
         OR consumed_at IS NOT NULL`
+  );
+}
+
+export function hashRefreshToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+export async function setDeviceRefreshTokenHash(deviceId: string, tokenHash: string) {
+  await pool.query(
+    `UPDATE devices SET refresh_token_hash = $1 WHERE device_id = $2`,
+    [tokenHash, deviceId]
+  );
+}
+
+export async function clearDeviceRefreshTokenHash(deviceId: string) {
+  await pool.query(
+    `UPDATE devices SET refresh_token_hash = NULL WHERE device_id = $1`,
+    [deviceId]
+  );
+}
+
+export async function insertActivityLogWithClient(
+  client: { query: (sql: string, params?: unknown[]) => Promise<unknown> },
+  log: { deviceId: string; userId: string; action: string; description?: string; timestamp: string }
+) {
+  await client.query(
+    `INSERT INTO activity_logs (device_id, user_id, action, description, created_at)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [log.deviceId, log.userId, log.action, log.description || '', log.timestamp]
   );
 }

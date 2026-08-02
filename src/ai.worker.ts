@@ -15,7 +15,7 @@ function validateWorkerEnv() {
 async function startWorker() {
 	try {
 		validateWorkerEnv();
-		await setupAiReportConsumer();
+		await setupAiReportConsumer({ throwOnFailure: true });
 		logger.info('AI worker started');
 	} catch (error) {
 		logger.error('Failed to start AI worker:', error);

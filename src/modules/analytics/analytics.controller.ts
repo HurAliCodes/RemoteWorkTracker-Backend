@@ -1,5 +1,6 @@
 import type { Response } from 'express';
 import type { AuthRequest } from '../../middleware/auth.middleware';
+import { isManagerOrAdmin } from '../../middleware/requireAdmin.middleware';
 import { AiServiceError } from '../ai/ai.service';
 import { success, error } from '../../utils/response';
 import { resolveCallerOrganizationId } from '../../utils/resolve-org-from-auth';
@@ -17,6 +18,21 @@ import {
 	analyticsOverviewQuerySchema,
 	generateAiReportBodySchema,
 } from './analytics.validation';
+
+function filterSeriesToSelf(
+	payload: { meta?: unknown; data?: Array<{ userId?: string }> },
+	userId?: string
+) {
+	if (!userId || !Array.isArray(payload?.data)) return payload;
+	return {
+		...payload,
+		data: payload.data.filter((row) => row.userId === userId),
+		meta: {
+			...(payload.meta && typeof payload.meta === 'object' ? payload.meta : {}),
+			selfScoped: true,
+		},
+	};
+}
 
 export async function getAnalyticsOverviewController(req: AuthRequest, res: Response) {
 	try {
@@ -70,7 +86,11 @@ export async function getProductivityAnalyticsController(req: AuthRequest, res: 
 		}
 
 		const payload = await getProductivityAnalytics(organizationId, q);
-		return success(res, payload, 'Productivity analytics (task-based facts)');
+		const privileged = await isManagerOrAdmin(req);
+		const scoped = privileged
+			? payload
+			: filterSeriesToSelf(payload, req.user?.userId);
+		return success(res, scoped, 'Productivity analytics (task-based facts)');
 	} catch (err) {
 		return error(res, 'Failed to load productivity analytics', 500, err);
 	}
@@ -92,7 +112,11 @@ export async function getTeamPerformanceAnalyticsController(req: AuthRequest, re
 		}
 
 		const payload = await getTeamPerformanceAnalytics(organizationId, q);
-		return success(res, payload, 'Team performance analytics');
+		const privileged = await isManagerOrAdmin(req);
+		const scoped = privileged
+			? payload
+			: filterSeriesToSelf(payload, req.user?.userId);
+		return success(res, scoped, 'Team performance analytics');
 	} catch (err) {
 		return error(res, 'Failed to load team performance analytics', 500, err);
 	}
